@@ -1,0 +1,19 @@
+# ---- 本地运行时产物 ----
+config.json
+widget.log
+*.todo_tmp
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+
+# ---- 个人/本机资料，不进公开仓库 ----
+backup_*/
+widget_*.png
+.scratch/
+docs/agents/workspace.yaml
+
+# ---- 本机调试脚本（含本机绝对路径）----
+probe_windows.py
+shot_widget.py
+roundtrip_check.py

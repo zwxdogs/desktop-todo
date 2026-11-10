@@ -1,0 +1,989 @@
+# -*- coding: utf-8 -*-
+"""
+桌面待办 —— 把 Markdown 待办清单固定在 Windows 桌面上显示和编辑。
+
+用法:
+    pythonw todo.pyw [md文件路径]
+不带参数时读取 config.json 中记住的文件（默认程序目录下的 待办.md）。
+传入文件路径即为测试运行：不读写 config.json，并在文件旁写 widget.log 便于调试。
+
+行为:
+- 默认嵌入桌面层（壁纸/图标之上、普通窗口之下），不占任务栏，Win+D 可见
+- 清单模式: 点击方框勾选、双击文字编辑、右键增删条目
+- 原文模式: 直接编辑 Markdown 源文本（右上角按钮切换）
+- 外部改动（如 Obsidian）约 1 秒内自动刷新; 桌面上的改动自动写回文件
+- 序列化时未被编辑的行原样保留, 不破坏 Obsidian 的格式
+"""
+import ctypes
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from ctypes import wintypes
+
+import tkinter as tk
+from tkinter import font as tkfont, filedialog, messagebox
+
+APP_NAME = "桌面待办"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+DEFAULT_FILE = os.path.join(APP_DIR, "待办.md")
+MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
+TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
+
+# ---------------- 配色 ----------------
+C_BG     = "#FAFBFC"
+C_HEADER = "#EDF0F4"
+C_TEXT   = "#24292F"
+C_DONE   = "#9CA3AF"
+C_NOTE   = "#8B929B"
+C_HEADFG = "#3D76B5"
+C_ACCENT = "#4A8FE2"
+C_BOX    = "#B6BDC6"
+
+# ---------------- Markdown 行解析 ----------------
+RE_BLANK  = re.compile(r"^\s*$")
+RE_HEADER = re.compile(r"^(\s*)\*\*(.+?)\*\*\s*$")
+RE_TODO   = re.compile(r"^(\s*)([-*+])[ \t]+\[([ xX])\](\s*)(.*)$")
+RE_NOTE   = re.compile(r"^(\s*)([-*+])[ \t]+(.*)$")
+
+
+class Line:
+    """文件中的一行。raw 为原始文本(含行尾符)，未被编辑的行写回时一字不动。"""
+    __slots__ = ("kind", "raw", "indent", "marker", "checked",
+                 "text", "cb_pos", "ws_after_cb", "ending")
+
+    def __init__(self, kind, raw, indent="", marker="", checked=False,
+                 text="", cb_pos=-1, ws_after_cb=""):
+        self.kind = kind          # blank / header / todo / note / other
+        self.raw = raw
+        self.indent = indent
+        self.marker = marker
+        self.checked = checked
+        self.text = text
+        self.cb_pos = cb_pos      # raw 中 "[" 的下标, 翻转勾选时原位替换
+        self.ws_after_cb = ws_after_cb
+        m = re.search(r"(\r?\n)$", raw)
+        self.ending = m.group(1) if m else ""
+
+    def indent_units(self):
+        return len(self.indent.expandtabs(4))
+
+
+def parse_line(raw):
+    m = re.search(r"(\r?\n)$", raw)
+    body = raw[:m.start()] if m else raw
+    if RE_BLANK.match(body):
+        return Line("blank", raw)
+    m = RE_HEADER.match(body)
+    if m:
+        return Line("header", raw, indent=m.group(1), text=m.group(2))
+    m = RE_TODO.match(body)
+    if m:
+        return Line("todo", raw, indent=m.group(1), marker=m.group(2),
+                    checked=m.group(3) != " ", text=m.group(5),
+                    cb_pos=m.start(3), ws_after_cb=m.group(4))
+    m = RE_NOTE.match(body)
+    if m:
+        return Line("note", raw, indent=m.group(1), marker=m.group(2), text=m.group(3))
+    return Line("other", raw, text=body)
+
+
+def parse_text(text):
+    return [parse_line(l) for l in text.splitlines(True)]
+
+
+def serialize(lines):
+    return "".join(l.raw for l in lines)
+
+
+def toggle_raw(line):
+    """原位翻转 [ ] / [x]，其余字符一字不动。cb_pos 指向方括号内的状态字符。"""
+    i = line.cb_pos
+    line.raw = line.raw[:i] + ("x" if not line.checked else " ") + line.raw[i + 1:]
+    line.checked = not line.checked
+
+
+def set_line_text(line, text):
+    line.text = text
+    if line.kind == "todo":
+        line.raw = (line.indent + line.marker + " ["
+                    + ("x" if line.checked else " ") + "]"
+                    + line.ws_after_cb + text + line.ending)
+    elif line.kind == "note":
+        line.raw = line.indent + line.marker + " " + text + line.ending
+    elif line.kind == "header":
+        line.raw = line.indent + "**" + text + "**" + line.ending
+    else:
+        line.raw = text + line.ending
+
+
+def child_indent(line):
+    """子项缩进：对齐到父条目正文位置，Obsidian 里可正确嵌套。"""
+    if line.kind == "todo":
+        n = line.indent_units() + len(line.marker) + 6   # "- [ ] " 正文起点
+    else:
+        n = line.indent_units() + len(line.marker) + 2
+    return " " * n
+
+
+# ---------------- Win32: 伪桌面层 ----------------
+# 思路: 不用 SetParent 挂载(Tk 窗口被挂载后 DWM 不再合成其画面, 且坐标系错乱),
+# 而是把普通顶层窗口压到 Z 序底部、桌面窗口(Progman)之上 —— 效果等同贴在桌面上:
+# 普通应用窗口自然盖住它; 显示桌面/最小化应用时它可见、可点击。
+user32 = ctypes.windll.user32
+
+HWND_BOTTOM = 1
+GW_HWNDPREV = 3
+SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
+SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x0010, 0x0020, 0x0040
+
+
+def toplevel_hwnd(widget):
+    h = widget.winfo_id()
+    p = user32.GetParent(h)
+    return p or h
+
+
+def _set_window_long(hwnd, index, value):
+    """SetWindowLongW 需要的 32 位有符号值(Python 无符号结果超出范围时会 OverflowError)。"""
+    value &= 0xFFFFFFFF
+    if value >= 0x80000000:
+        value -= 0x100000000
+    return user32.SetWindowLongW(hwnd, index, value)
+
+
+def desktop_hwnd():
+    return user32.FindWindowW("Progman", None)
+
+
+def set_toolwindow(root):
+    """WS_EX_TOOLWINDOW: 不出现在任务栏和 Alt+Tab。"""
+    hwnd = toplevel_hwnd(root)
+    GWL_EXSTYLE, WS_EX_TOOLWINDOW = -20, 0x00000080
+    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    _set_window_long(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW)
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE)
+
+
+def send_above_desktop(root):
+    """把窗口压到"桌面之上、其余窗口之下"的 Z 序位置。"""
+    hwnd = toplevel_hwnd(root)
+    progman = desktop_hwnd()
+    if not progman:
+        return
+    user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    # 把桌面窗口垫到我们正下方(Progman 平时就在最底, 该调用通常只是保持原位)
+    user32.SetWindowPos(progman, hwnd, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+
+def at_desktop_level(root):
+    """是否已在'紧贴桌面上方'的 Z 序位置。"""
+    progman = desktop_hwnd()
+    return bool(progman) and user32.GetWindow(progman, GW_HWNDPREV) == toplevel_hwnd(root)
+
+
+def is_foreground(root):
+    return user32.GetForegroundWindow() == toplevel_hwnd(root)
+
+
+def is_iconic(root):
+    return bool(user32.IsIconic(toplevel_hwnd(root)))
+
+
+# ---------------- 主应用 ----------------
+class App:
+    def __init__(self, root, file_path):
+        self.root = root
+        self.file = file_path
+        self.testing = TEST_MODE
+        self.cfg = {}
+        if not self.testing and os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, encoding="utf-8") as f:
+                    self.cfg = json.load(f)
+            except Exception:
+                self.cfg = {}
+
+        self.lines = []
+        self.nl = "\n"
+        self.has_bom = False
+        self.last_seen = None
+        self.save_job = None
+        self.raw_save_job = None
+        self.raw_mode = None
+        self.text = None
+        self.text_sb = None
+        self.text_focused = False
+        self.docked = False
+        self._pox = self._poy = 0   # 桌面父窗口客户区原点(屏幕坐标)
+        self.rows = {}
+        self.edit_entry = None
+        self.edit_index = -1
+        self.missing_shown = False
+        self.undo_stack = []
+        self._dx = self._dy = 0
+        self._mx = self._my = 0
+        self._rw = self._rh = 0
+        self.logf = None
+        if self.testing:
+            self.logf = open(os.path.join(os.path.dirname(self.file), "widget.log"),
+                             "a", encoding="utf-8", buffering=1)
+
+        s = self.s = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        root.title(APP_NAME)
+        root.configure(bg=C_BG)
+        root.overrideredirect(True)
+        root.minsize(int(260 * s), int(180 * s))
+
+        self.f_item = tkfont.Font(family="Microsoft YaHei UI", size=10)
+        self.f_item_done = tkfont.Font(family="Microsoft YaHei UI", size=10, overstrike=1)
+        self.f_note = tkfont.Font(family="Microsoft YaHei UI", size=9)
+        self.f_note_done = tkfont.Font(family="Microsoft YaHei UI", size=9, overstrike=1)
+        self.f_head = tkfont.Font(family="Microsoft YaHei UI", size=11, weight="bold")
+        self.f_btn = tkfont.Font(family="Microsoft YaHei UI", size=9)
+        self.f_raw = tkfont.Font(family="Microsoft YaHei UI", size=10)
+
+        # --- 顶栏 ---
+        hdr = tk.Frame(root, bg=C_HEADER, height=int(34 * s))
+        hdr.pack(fill="x", side="top")
+        hdr.pack_propagate(False)
+        self.hdr = hdr
+        self.lbl_title = tk.Label(hdr, text=APP_NAME, bg=C_HEADER, fg=C_TEXT,
+                                  font=self.f_btn, cursor="fleur")
+        self.lbl_title.pack(side="left", padx=(int(10 * s), 0))
+
+        def hbtn(text, cmd):
+            b = tk.Label(hdr, text=text, bg=C_HEADER, fg="#5A6472", font=self.f_btn,
+                         padx=int(7 * s), cursor="hand2")
+            b.bind("<Button-1>", lambda e: cmd())
+            return b
+
+        self.btn_close = hbtn("✕", self.on_close)
+        self.btn_mode = hbtn("原文", self.toggle_mode)
+        self.btn_add = hbtn("＋", self.add_todo_end)
+        self.btn_close.pack(side="right", padx=(0, int(6 * s)))
+        self.btn_mode.pack(side="right")
+        self.btn_add.pack(side="right")
+
+        for w in (hdr, self.lbl_title):
+            w.bind("<Button-1>", self._drag_press, add="+")
+            w.bind("<B1-Motion>", self._drag_move, add="+")
+            w.bind("<ButtonRelease-1>", lambda e: self.save_config(), add="+")
+            w.bind("<Button-3>", self.menu_global, add="+")
+
+        # --- 清单区 ---
+        self.canvas = tk.Canvas(root, bg=C_BG, highlightthickness=0,
+                                yscrollincrement=int(26 * s))
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Button-3>", self.menu_global, add="+")
+        self.canvas.bind("<MouseWheel>", self._on_wheel, add="+")
+        self.list_frame = tk.Frame(self.canvas, bg=C_BG)
+        self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw", tags=("inner",))
+        self.list_frame.bind("<Configure>",
+                             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+
+        # --- 右下角缩放把手 ---
+        self.grip = tk.Label(root, text="◢", bg=C_BG, fg="#C4CAD2", font=self.f_btn,
+                             cursor="bottom_right_corner")
+        self.grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.grip.bind("<Button-1>", self._rs_press, add="+")
+        self.grip.bind("<B1-Motion>", self._rs_move, add="+")
+        self.grip.bind("<ButtonRelease-1>", lambda e: self.save_config(), add="+")
+        self.grip.bind("<Button-3>", self.menu_global, add="+")
+
+        self.root.bind("<Control-z>", self.undo)
+
+    # ---------- 日志 ----------
+    def log(self, msg):
+        if self.logf:
+            self.logf.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+
+    # ---------- 文件读写 ----------
+    def stat_now(self):
+        try:
+            st = os.stat(self.file)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def read_file(self):
+        with open(self.file, "rb") as f:
+            data = f.read()
+        self.has_bom = data.startswith(b"\xef\xbb\xbf")
+        if self.has_bom:
+            data = data[3:]
+        text = data.decode("utf-8")
+        self.nl = "\r\n" if "\r\n" in text else "\n"
+        return text
+
+    def write_text(self, content):
+        data = (b"\xef\xbb\xbf" if self.has_bom else b"") + content.encode("utf-8")
+        tmp = self.file + ".todo_tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, self.file)
+        self.last_seen = self.stat_now()
+
+    def load_file(self):
+        if not os.path.exists(self.file):
+            self.show_missing()
+            self.log("file missing: %s" % self.file)
+            return
+        text = self.read_file()
+        self.lines = parse_text(text)
+        self.last_seen = self.stat_now()
+        self.undo_stack = []   # 文件被外部/重新加载, 撤销历史失效
+        base = os.path.basename(self.file)
+        if base.lower().endswith(".md"):
+            base = base[:-3]
+        self.lbl_title.config(text=base)
+        if self.raw_mode:
+            pos = self.text.yview()[0]
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", text)
+            self.text.yview_moveto(pos)
+        else:
+            self.render_list()
+        self.log("loaded %d lines from %s" % (len(self.lines), self.file))
+
+    def show_missing(self):
+        if self.missing_shown:
+            return
+        self.missing_shown = True
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+        lbl = tk.Label(self.list_frame,
+                       text="文件不存在：\n%s\n\n右键 → 「更换文件…」可选择新的文件" % self.file,
+                       bg=C_BG, fg=C_NOTE, font=self.f_item, justify="left",
+                       wraplength=int(300 * self.s))
+        lbl.pack(pady=int(40 * self.s), padx=int(16 * self.s))
+        self._wheel_bind(lbl)
+
+    # ---------- 渲染清单 ----------
+    def render_list(self):
+        y = self.canvas.yview()[0]
+        self.close_editor()
+        self.missing_shown = False
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+        self.rows = {}
+        for i, ln in enumerate(self.lines):
+            self.build_row(i, ln)
+        tail = tk.Frame(self.list_frame, bg=C_BG, height=int(28 * self.s))
+        tail.pack(fill="x")
+        self.list_frame.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.yview_moveto(y)
+        self._update_wrap()
+        self._wheel_bind(self.list_frame)
+        if self.testing:
+            for i, ln in enumerate(self.lines):
+                if ln.kind == "todo":
+                    b = self.rows[i]["box"]
+                    self.log("todo i=%d checked=%s box screen=%d,%d"
+                             % (i, ln.checked, b.winfo_rootx(), b.winfo_rooty()))
+
+    def build_row(self, i, ln):
+        s = self.s
+        f = self.list_frame
+        if ln.kind == "blank":
+            tk.Frame(f, bg=C_BG, height=int(6 * s)).pack(fill="x")
+            return
+        pad = int(12 * s) + min(ln.indent_units() * int(7 * s), int(160 * s))
+        row = tk.Frame(f, bg=C_BG)
+        row.pack(fill="x")
+        info = {"row": row, "lbl": None, "box": None}
+
+        if ln.kind == "header":
+            lbl = tk.Label(row, text=ln.text, bg=C_BG, fg=C_HEADFG, font=self.f_head,
+                           anchor="w", justify="left")
+            lbl.pack(fill="x", padx=(pad, int(10 * s)), pady=(int(10 * s), int(2 * s)))
+            info["lbl"], info["pack"], info["font"] = lbl, \
+                {"fill": "x", "padx": (pad, int(10 * s)), "pady": (int(10 * s), int(2 * s))}, self.f_head
+            info["wrap_pad"] = pad
+            lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
+            lbl.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
+        else:
+            if ln.kind == "todo":
+                box = tk.Canvas(row, width=int(18 * s), height=int(18 * s),
+                                bg=C_BG, highlightthickness=0, cursor="hand2")
+                box.pack(side="left", padx=(pad, int(7 * s)), pady=int(4 * s))
+                self.draw_box(box, ln.checked)
+                box.bind("<Button-1>", lambda e, i=i: self.toggle_line(i))
+                box.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
+                info["box"] = box
+            elif ln.kind == "note":
+                pad += int(16 * s)
+            font = (self.f_item_done if ln.checked else self.f_item) \
+                if ln.kind == "todo" else \
+                (self.f_note_done if ln.checked else self.f_note)
+            fg = (C_DONE if ln.checked else C_TEXT) if ln.kind == "todo" else \
+                 (C_DONE if ln.checked else C_NOTE)
+            if ln.kind == "other":
+                fg = C_TEXT
+                font = self.f_item
+            # 普通注释行渲染出无序列表圆点(仅显示用, 不写入文件)
+            text_disp = ("• " + ln.text) if ln.kind == "note" else ln.text
+            lbl = tk.Label(row, text=text_disp, bg=C_BG, fg=fg, font=font,
+                           anchor="w", justify="left")
+            info["wrap_pad"] = pad if ln.kind != "todo" \
+                else pad + int(18 * s) + int(7 * s)
+            lbl.pack(side="left", fill="x", expand=True,
+                     padx=(0 if ln.kind == "todo" else pad, int(12 * s)), pady=int(2 * s))
+            info["lbl"] = lbl
+            info["font"] = font
+            info["pack"] = {"side": "left", "fill": "x", "expand": True,
+                            "padx": (0 if ln.kind == "todo" else pad, int(12 * s)),
+                            "pady": int(2 * s)}
+            lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
+            lbl.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
+        self.rows[i] = info
+
+    def draw_box(self, canvas, checked):
+        s = self.s
+        canvas.delete("all")
+        a, b = int(2 * s), int(16 * s)
+        if checked:
+            canvas.create_rectangle(a, a, b, b, fill=C_ACCENT, outline=C_ACCENT)
+            canvas.create_line(int(5 * s), int(9 * s), int(8 * s), int(12 * s),
+                               fill="white", width=2, capstyle="round", joinstyle="round")
+            canvas.create_line(int(8 * s), int(12 * s), int(13 * s), int(5 * s),
+                               fill="white", width=2, capstyle="round", joinstyle="round")
+        else:
+            canvas.create_rectangle(a, a, b, b, outline=C_BOX, width=int(1 * s) + 1)
+
+    def _wheel_bind(self, w):
+        w.bind("<MouseWheel>", self._on_wheel, add="+")
+        for c in w.winfo_children():
+            self._wheel_bind(c)
+
+    def _on_wheel(self, e):
+        self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
+
+    def _on_canvas_configure(self, e):
+        self.canvas.itemconfigure("inner", width=e.width)
+        self._update_wrap()
+
+    def _update_wrap(self):
+        """按当前窗口宽度给每行文字设置自动换行宽度。"""
+        w = self.canvas.winfo_width()
+        if w <= 10:
+            return
+        right = int(30 * self.s)
+        for info in self.rows.values():
+            lbl = info.get("lbl")
+            if lbl is not None:
+                lbl.configure(wraplength=max(80, int(w - info.get("wrap_pad", 0) - right)))
+
+    # ---------- 编辑操作 ----------
+    def toggle_line(self, i):
+        ln = self.lines[i]
+        self.push_undo()
+        toggle_raw(ln)
+        self.log("toggle i=%d checked=%s" % (i, ln.checked))
+        self.render_list()
+        self.schedule_save()
+
+    def edit_row(self, i):
+        if self.raw_mode or self.missing_shown:
+            return
+        rw = self.rows.get(i)
+        if not rw or not rw["lbl"]:
+            return
+        ln = self.lines[i]
+        self.log("edit_row i=%d" % i)
+        lbl = rw["lbl"]
+        ent = tk.Entry(rw["row"], font=rw.get("font", self.f_item), bg="#FFFFFF", fg=C_TEXT,
+                       relief="solid", bd=1, highlightthickness=1,
+                       highlightbackground=C_ACCENT, highlightcolor=C_ACCENT)
+        lbl.pack_forget()
+        ent.pack(**rw["pack"])
+        ent.insert(0, ln.text)
+        ent.select_range(0, "end")
+        ent.icursor("end")
+        ent.focus_set()
+        self.edit_entry = ent
+        self.edit_index = i
+
+        def commit(event=None):
+            if self.edit_entry is not ent:
+                return
+            val = ent.get()
+            self.edit_entry = None
+            self.push_undo()
+            set_line_text(self.lines[i], val)
+            self.render_list()
+            self.schedule_save()
+
+        def cancel(event=None):
+            if self.edit_entry is not ent:
+                return
+            self.edit_entry = None
+            self.render_list()
+
+        ent.bind("<Return>", commit)
+        ent.bind("<KP_Enter>", commit)
+        ent.bind("<Escape>", cancel)
+        ent.bind("<FocusOut>", commit)
+
+    def close_editor(self):
+        if self.edit_entry is not None and 0 <= self.edit_index < len(self.lines):
+            ent = self.edit_entry
+            self.edit_entry = None
+            try:
+                self.push_undo()
+                set_line_text(self.lines[self.edit_index], ent.get())
+                self.schedule_save()
+            except Exception:
+                pass
+
+    def insert_line(self, i, kind, indent, text=""):
+        """在第 i 行之后插入一行（i=-1 表示最前）。"""
+        self.push_undo()
+        if 0 <= i < len(self.lines) and not self.lines[i].raw.endswith("\n"):
+            self.lines[i].raw += self.nl
+        raw = indent + ("- [ ] " if kind == "todo" else "- ") + text + self.nl
+        self.lines.insert(i + 1, parse_line(raw))
+        self.render_list()
+        self.schedule_save()
+        self.root.after(30, lambda: self.edit_row(i + 1))
+
+    def delete_line(self, i):
+        if not 0 <= i < len(self.lines):
+            return
+        if self.edit_index == i:
+            self.edit_entry = None
+        self.push_undo()
+        self.lines.pop(i)
+        self.render_list()
+        self.schedule_save()
+
+    def add_todo_end(self):
+        if not os.path.exists(self.file):
+            self.lines = []
+            self.missing_shown = False
+            self.write_text("- [ ] 新待办" + self.nl)
+            self.last_seen = self.stat_now()
+        if not self.lines:
+            self.insert_line(-1, "todo", "", "新待办")
+            return
+        self.insert_line(len(self.lines) - 1, "todo", "", "新待办")
+
+    # ---------- 分组操作 ----------
+    def group_block_end(self, i):
+        """第 i 行所在分组块的末尾(下一个分组标题之前的插入位置)。"""
+        j = i + 1
+        while j < len(self.lines) and self.lines[j].kind != "header":
+            j += 1
+        return j
+
+    def insert_group(self, i):
+        """在第 i 行所属分组之后插入新分组(该分组已有条目不会被划进新分组)。"""
+        self.push_undo()
+        pos = self.group_block_end(i)
+        if 0 <= pos - 1 < len(self.lines) and not self.lines[pos - 1].raw.endswith("\n"):
+            self.lines[pos - 1].raw += self.nl
+        self.lines.insert(pos, parse_line("**新分组**" + self.nl))
+        self.render_list()
+        self.schedule_save()
+        self.root.after(30, lambda: self.edit_row(pos))
+
+    # ---------- 撤销 ----------
+    def push_undo(self):
+        """把当前清单内容压入撤销栈(调用时机: 即将修改清单内容之前)。"""
+        snap = serialize(self.lines)
+        if self.undo_stack and self.undo_stack[-1] == snap:
+            return
+        self.undo_stack.append(snap)
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+
+    def undo(self, event=None):
+        """Ctrl+Z: 撤回最近一次清单改动(勾选/改字/插入/删除)。"""
+        if self.raw_mode or self.edit_entry is not None or not self.undo_stack:
+            return
+        snap = self.undo_stack.pop()
+        try:
+            self.write_text(snap)
+        except Exception as e:
+            self.log("undo save failed: %r" % e)
+            return
+        self.lines = parse_text(snap)
+        self.render_list()
+        self.log("undo (left %d snapshots)" % len(self.undo_stack))
+        return "break"
+
+    # ---------- 保存 ----------
+    def schedule_save(self):
+        if self.save_job:
+            self.root.after_cancel(self.save_job)
+        self.save_job = self.root.after(250, self.do_save)
+
+    def do_save(self):
+        self.save_job = None
+        try:
+            self.write_text(serialize(self.lines))
+            self.log("saved %d lines" % len(self.lines))
+        except Exception as e:
+            self.log("save failed: %r" % e)
+            self.lbl_title.config(text="保存失败!")
+
+    def on_raw_key(self, e=None):
+        if self.raw_save_job:
+            self.root.after_cancel(self.raw_save_job)
+        self.raw_save_job = self.root.after(300, self.flush_raw_save)
+
+    def flush_raw_save(self):
+        self.raw_save_job = None
+        if not self.raw_mode or self.text is None:
+            return
+        content = self.text.get("1.0", "end-1c")
+        if content and not content.endswith("\n"):
+            content += self.nl
+        try:
+            self.write_text(content)
+            self.lines = parse_text(content)
+            self.log("saved (raw) %d lines" % len(self.lines))
+        except Exception as e:
+            self.log("raw save failed: %r" % e)
+
+    # ---------- 模式切换 ----------
+    def toggle_mode(self):
+        if self.raw_mode:
+            self.exit_raw()
+        else:
+            self.enter_raw()
+        self.save_config()
+
+    def enter_raw(self):
+        if self.raw_mode:
+            return
+        self.close_editor()
+        self.raw_mode = True
+        self.btn_mode.config(text="清单")
+        self.canvas.pack_forget()
+        s = self.s
+        self.text_sb = tk.Scrollbar(self.root, width=int(10 * s))
+        self.text = tk.Text(self.root, bg="#FFFFFF", fg=C_TEXT, font=self.f_raw,
+                            wrap="char", relief="flat", bd=0, undo=True,
+                            padx=int(10 * s), pady=int(8 * s), spacing1=1, spacing3=1,
+                            yscrollcommand=self.text_sb.set)
+        self.text_sb.configure(command=self.text.yview)
+        self.text_sb.pack(side="right", fill="y")
+        self.text.pack(fill="both", expand=True)
+        self.text.insert("1.0", serialize(self.lines))
+        self.text.bind("<KeyRelease>", self.on_raw_key, add="+")
+        self.text.bind("<FocusIn>", lambda e: setattr(self, "text_focused", True), add="+")
+        self.text.bind("<FocusOut>", lambda e: setattr(self, "text_focused", False), add="+")
+        self.text.focus_set()
+        self.log("enter raw mode")
+
+    def exit_raw(self):
+        if not self.raw_mode:
+            return
+        if self.raw_save_job:
+            self.root.after_cancel(self.raw_save_job)
+            self.raw_save_job = None
+        content = self.text.get("1.0", "end-1c")
+        if content and not content.endswith("\n"):
+            content += self.nl
+        try:
+            self.write_text(content)
+        except Exception as e:
+            self.log("raw save failed: %r" % e)
+        self.lines = parse_text(content)
+        self.undo_stack = []   # 原文模式的改动由 Text 自身撤销, 切回后清单历史重新开始
+        self.text.destroy()
+        self.text_sb.destroy()
+        self.text = self.text_sb = None
+        self.raw_mode = False
+        self.text_focused = False
+        self.btn_mode.config(text="原文")
+        self.canvas.pack(fill="both", expand=True)
+        self.render_list()
+        self.log("exit raw mode")
+
+    # ---------- 右键菜单 ----------
+    def menu_row(self, event, i):
+        ln = self.lines[i]
+        m = tk.Menu(self.root, tearoff=0, font=self.f_btn)
+        if ln.kind == "header":
+            m.add_command(label="在此分组添加待办",
+                          command=lambda: self.insert_line(i, "todo",
+                                                           self._next_todo_indent(i), "新待办"))
+            m.add_command(label="在下方插入分组", command=lambda: self.insert_group(i))
+            m.add_command(label="重命名分组", command=lambda: self.edit_row(i))
+            m.add_command(label="删除分组标题", command=lambda: self.delete_line(i))
+        elif ln.kind == "todo":
+            m.add_command(label="在下方插入待办",
+                          command=lambda: self.insert_line(i, "todo", ln.indent, "新待办"))
+            m.add_command(label="在下方插入子待办",
+                          command=lambda: self.insert_line(i, "todo", child_indent(ln), "新待办"))
+            m.add_command(label="在下方插入分组", command=lambda: self.insert_group(i))
+            m.add_separator()
+            m.add_command(label="编辑", command=lambda: self.edit_row(i))
+            m.add_command(label="删除", command=lambda: self.delete_line(i))
+        elif ln.kind == "note":
+            m.add_command(label="在下方插入注释",
+                          command=lambda: self.insert_line(i, "note", ln.indent))
+            m.add_command(label="在下方插入分组", command=lambda: self.insert_group(i))
+            m.add_command(label="编辑", command=lambda: self.edit_row(i))
+            m.add_command(label="删除", command=lambda: self.delete_line(i))
+        else:
+            return
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _next_todo_indent(self, i):
+        """分组标题后的第一条待办缩进：跟随已有的下一条待办，否则顶格。"""
+        for j in range(i + 1, len(self.lines)):
+            if self.lines[j].kind == "todo":
+                return self.lines[j].indent
+            if self.lines[j].kind in ("header", "blank"):
+                break
+        return ""
+
+    def menu_global(self, event):
+        m = tk.Menu(self.root, tearoff=0, font=self.f_btn)
+        m.add_command(label="切换到清单模式" if self.raw_mode else "切换到原文模式",
+                      command=self.toggle_mode)
+        m.add_command(label="悬浮置顶" if self.docked else "嵌入桌面",
+                      command=self.toggle_dock)
+        m.add_command(label="在末尾添加分组",
+                      command=lambda: self.insert_group(len(self.lines) - 1))
+        m.add_command(label="更换文件…", command=self.choose_file)
+        m.add_command(label="从文件重新加载", command=self.load_file)
+        m.add_command(label="打开文件位置", command=self.open_file_location)
+        m.add_separator()
+        m.add_command(label="退出", command=self.on_close)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def choose_file(self):
+        init = os.path.dirname(self.file) if os.path.exists(self.file) else APP_DIR
+        path = filedialog.askopenfilename(
+            title="选择待办 Markdown 文件", parent=self.root, initialdir=init,
+            filetypes=[("Markdown 文件", "*.md"), ("所有文件", "*.*")])
+        if path:
+            self.file = path
+            self.missing_shown = False
+            self.load_file()
+            self.save_config()
+
+    def open_file_location(self):
+        """在资源管理器中打开待办文件所在目录并选中该文件。"""
+        path = os.path.normpath(self.file)
+        try:
+            if os.path.exists(path):
+                # canonical 形式: explorer /select,"路径" (整个作为一条命令行传给 explorer)
+                subprocess.Popen('explorer /select,"%s"' % path)
+                self.log("open location: %s" % path)
+            elif os.path.isdir(os.path.dirname(path)):
+                subprocess.Popen('explorer "%s"' % os.path.dirname(path))
+                self.log("open dir (file missing): %s" % os.path.dirname(path))
+            else:
+                messagebox.showinfo(APP_NAME, "文件和目录都不存在：\n%s" % path,
+                                    parent=self.root)
+        except Exception as e:
+            self.log("open location failed: %r" % e)
+            messagebox.showinfo(APP_NAME, "打开失败：%s" % e, parent=self.root)
+
+    def toggle_dock(self):
+        if self.docked:
+            self.docked = False
+            self.root.attributes("-topmost", True)
+            self.root.lift()
+        else:
+            self.docked = True
+            self.root.attributes("-topmost", False)
+            send_above_desktop(self.root)
+        self.save_config()
+
+    # ---------- 外部变化轮询 ----------
+    def poll(self):
+        try:
+            # 桌面模式: 维持"桌面之上、其他窗口之下"的贴桌面状态
+            if self.docked:
+                if is_iconic(self.root):
+                    # Win+D / 全部最小化会把本窗口也最小化, 立即还原, 保持桌面可见
+                    self.root.deiconify()
+                    send_above_desktop(self.root)
+                    self.log("restored from Win+D minimize")
+                elif not is_foreground(self.root) and not at_desktop_level(self.root):
+                    send_above_desktop(self.root)
+            cur = self.stat_now()
+            if cur is None:
+                if not self.missing_shown and not self.raw_mode:
+                    self.show_missing()
+                    self.log("file disappeared")
+                self.last_seen = None
+            elif cur != self.last_seen:
+                self.last_seen = cur
+                if not (self.raw_mode and self.text_focused):
+                    self.log("external change -> reload")
+                    self.load_file()
+        except Exception as e:
+            self.log("poll error: %r" % e)
+        self.root.after(1000, self.poll)
+
+    # ---------- 窗口拖动/缩放 ----------
+    def set_pos(self, sx, sy):
+        """以屏幕坐标设置窗口位置（嵌入模式下换算为父窗口坐标）。"""
+        self.root.geometry("+%d+%d" % (sx - self._pox, sy - self._poy))
+
+    def get_pos(self):
+        """返回窗口位置的屏幕坐标。"""
+        return (self.root.winfo_x() + self._pox, self.root.winfo_y() + self._poy)
+
+    def _drag_press(self, e):
+        self._dx = e.x_root - self.get_pos()[0]
+        self._dy = e.y_root - self.get_pos()[1]
+
+    def _drag_move(self, e):
+        self.set_pos(e.x_root - self._dx, e.y_root - self._dy)
+
+    def _rs_press(self, e):
+        self._rw, self._rh = self.root.winfo_width(), self.root.winfo_height()
+        self._mx, self._my = e.x_root, e.y_root
+
+    def _rs_move(self, e):
+        w = max(int(260 * self.s), self._rw + e.x_root - self._mx)
+        h = max(int(180 * self.s), self._rh + e.y_root - self._my)
+        self.root.geometry("%dx%d+%d+%d" % (w, h,
+                                            self.root.winfo_x(), self.root.winfo_y()))
+
+    # ---------- 配置/退出 ----------
+    def save_config(self):
+        if self.testing:
+            return
+        cfg = {"file": self.file,
+               "x": self.get_pos()[0], "y": self.get_pos()[1],
+               "w": self.root.winfo_width(), "h": self.root.winfo_height(),
+               "docked": self.docked}
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def on_close(self):
+        try:
+            if self.edit_entry is not None:
+                self.close_editor()
+                self.do_save()
+            if self.raw_mode:
+                if self.raw_save_job:
+                    self.root.after_cancel(self.raw_save_job)
+                    self.raw_save_job = None
+                self.raw_mode = False
+                self.flush_raw_save()
+            elif self.save_job:
+                self.root.after_cancel(self.save_job)
+                self.save_job = None
+                self.do_save()
+        except Exception:
+            pass
+        self.save_config()
+        self.log("exit")
+        if self.logf:
+            self.logf.close()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+
+def main():
+    if TEST_MODE:
+        file_path = sys.argv[1]
+        cfg = {}
+    else:
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = {}
+        file_path = cfg.get("file") or DEFAULT_FILE
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(APP_DIR, file_path)
+
+    # 单实例保护
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW(None, False, MUTEX_NAME)
+    if ctypes.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        sys.exit(0)
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+    root = tk.Tk()
+    app = App(root, file_path)
+
+    s = app.s
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()  # 物理像素
+
+    # argv[2] = "float" 悬浮置顶测试模式; argv[2] = "x,y" 指定桌面位置的测试模式(物理像素)
+    test_pos = None
+    want_dock = cfg.get("docked", True)
+    if app.testing and len(sys.argv) > 2:
+        if sys.argv[2] == "float":
+            want_dock = False
+        else:
+            try:
+                test_pos = tuple(int(v) for v in sys.argv[2].split(","))
+            except ValueError:
+                test_pos = None
+
+    if app.testing:
+        x = test_pos[0] if test_pos else int(100 * s)
+        y = test_pos[1] if test_pos else int(100 * s)
+        w, h = int(430 * s), int(660 * s)
+    else:
+        # config.json 里存的是物理像素; 首次运行按 DPI 缩放给出默认位置(屏幕右侧)
+        w = min(int(cfg["w"]), sw - 20) if "w" in cfg else int(380 * s)
+        h = min(int(cfg["h"]), sh - 60) if "h" in cfg else int(640 * s)
+        if "x" in cfg:
+            x, y = int(cfg["x"]), int(cfg["y"])
+        else:
+            x = sw - w - int(40 * s)
+            y = int(100 * s)
+        x = max(0, min(x, sw - int(80 * s)))
+        y = max(0, min(y, sh - int(80 * s)))
+        w = max(int(260 * s), w)
+        h = max(int(180 * s), h)
+    root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+    root.update_idletasks()
+
+    root.attributes("-topmost", True)   # 悬浮模式保持置顶; 桌面模式随后取消
+    set_toolwindow(root)                # 两种模式都不进任务栏/Alt+Tab
+    root.deiconify()
+    root.update()                       # 完成映射与首帧绘制
+
+    if want_dock:
+        app.docked = True
+        root.attributes("-topmost", False)
+        send_above_desktop(root)
+        app.log("desktop mode: hwnd=%s" % toplevel_hwnd(root))
+    app.load_file()
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    app.poll()
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
