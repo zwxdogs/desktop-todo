@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成应用图标 assets/app.ico —— 构建机一次性工具(需 Pillow), 不随包分发。
 
-    python gen_icon.py
+    py -3.12 gen_icon.py
 
 设计: 圆角方块底(#4A8FE2, 与应用强调色一致) + 白色对勾, 16px 下仍可辨认。
 """
@@ -32,6 +32,7 @@ for cx, cy in pts:
 
 os.makedirs("assets", exist_ok=True)
 img.save("assets/app.ico", sizes=SIZES)
+# 预览图: 改图标后人工目检用(放大看锯齿/描边), .scratch/ 不入库
 os.makedirs(".scratch", exist_ok=True)
 img.resize((64, 64), Image.LANCZOS).save(".scratch/icon_preview.png")
 print("written: assets/app.ico", SIZES)

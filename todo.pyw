@@ -365,8 +365,9 @@ class App:
             # 程序目录只读(如 Program Files)或文件被占用: 弹窗说明而不是静默丢失
             self._warn_readonly(e)
             self.log("write failed: %s" % e)
-            return
+            return False
         self.last_seen = self.stat_now()
+        return True
 
     def load_file(self):
         if not os.path.exists(self.file):
@@ -666,8 +667,8 @@ class App:
     def do_save(self):
         self.save_job = None
         try:
-            self.write_text(serialize(self.lines))
-            self.log("saved %d lines" % len(self.lines))
+            if self.write_text(serialize(self.lines)):
+                self.log("saved %d lines" % len(self.lines))
         except Exception as e:
             self.log("save failed: %r" % e)
             self.lbl_title.config(text="保存失败!")
@@ -685,9 +686,9 @@ class App:
         if content and not content.endswith("\n"):
             content += self.nl
         try:
-            self.write_text(content)
-            self.lines = parse_text(content)
-            self.log("saved (raw) %d lines" % len(self.lines))
+            if self.write_text(content):
+                self.lines = parse_text(content)
+                self.log("saved (raw) %d lines" % len(self.lines))
         except Exception as e:
             self.log("raw save failed: %r" % e)
 

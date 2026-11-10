@@ -44,13 +44,24 @@ if (-not $hasPyi) {
     Invoke-Native "PyInstaller installation" py "-3.12" "-m" pip install "--user" pyinstaller
 }
 
-# 3. Generate icon if missing
+# 3. Generate icon if missing (same Python 3.12 interpreter as the build;
+#    gen_icon.py needs Pillow, installed into 3.12 user site if absent)
 if (-not (Test-Path "assets/app.ico")) {
     Write-Host "[build] generating icon..."
-    Invoke-Native "icon generation" python gen_icon.py
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    py "-3.12" "-c" "import PIL" 2> $null | Out-Null
+    $hasPil = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prev
+    if (-not $hasPil) {
+        Invoke-Native "Pillow installation" py "-3.12" "-m" pip install "--user" pillow
+    }
+    Invoke-Native "icon generation" py "-3.12" gen_icon.py
 }
 
-# 4. Version comes from APP_VERSION in todo.pyw (single source of truth)
+# 4. Version comes from APP_VERSION in todo.pyw (single source of truth);
+#    regenerate the exe version resource from it so metadata cannot drift.
+Invoke-Native "version info generation" py "-3.12" packaging/gen_version_info.py
 $src = Get-Content todo.pyw -Encoding UTF8 -Raw
 if ($src -notmatch 'APP_VERSION\s*=\s*"([\d.]+)"') { throw "APP_VERSION not found in todo.pyw" }
 $ver = $Matches[1]

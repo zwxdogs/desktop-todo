@@ -1,6 +1,6 @@
 # UTF-8
-# exe 文件属性里的版本信息(资源管理器 → 属性 → 详细信息)。
-# 版本改动时同步 todo.pyw 的 APP_VERSION。
+# exe 文件属性里的版本信息(资源管理器 -> 属性 -> 详细信息)。
+# 本文件由 packaging/gen_version_info.py 从 todo.pyw 的 APP_VERSION 生成, 勿手改。
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(0, 1, 0, 0),
