@@ -17,3 +17,7 @@ docs/agents/workspace.yaml
 probe_windows.py
 shot_widget.py
 roundtrip_check.py
+
+# ---- 打包构建产物 ----
+build/
+dist/

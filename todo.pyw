@@ -27,11 +27,25 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(APP_DIR, "config.json")
-DEFAULT_FILE = os.path.join(APP_DIR, "待办.md")
+APP_VERSION = "0.1.0"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
+
+
+def _base_dir():
+    """程序目录: 打包成 exe 后取 exe 所在目录, 否则取本文件所在目录。
+
+    PyInstaller 冻结后 __file__ 指向临时解压目录(_MEIPASS)或
+    _internal 子目录, config.json/待办.md 必须跟着 exe 走(绿色便携版语义)。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_DIR = _base_dir()
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+DEFAULT_FILE = os.path.join(APP_DIR, "待办.md")
 
 # ---------------- 配色 ----------------
 C_BG     = "#FAFBFC"
@@ -231,9 +245,11 @@ class App:
         self._mx = self._my = 0
         self._rw = self._rh = 0
         self.logf = None
+        self.ro_warned = False   # 只读目录警告只弹一次
         if self.testing:
             self.logf = open(os.path.join(os.path.dirname(self.file), "widget.log"),
                              "a", encoding="utf-8", buffering=1)
+        self.log("%s v%s" % (APP_NAME, APP_VERSION))
 
         s = self.s = max(1.0, root.winfo_fpixels("1i") / 96.0)
         root.title(APP_NAME)
@@ -305,6 +321,21 @@ class App:
         if self.logf:
             self.logf.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
 
+    def _warn_readonly(self, e):
+        """程序目录不可写(常见于解压进 Program Files)时一次性弹窗提示。"""
+        if self.ro_warned or self.testing:
+            return
+        self.ro_warned = True
+        try:
+            messagebox.showwarning(
+                APP_NAME,
+                "程序目录不可写，设置和待办改动无法保存：\n%s\n(%s)\n\n"
+                "请把整个文件夹移动到可写目录使用（如桌面、D 盘），"
+                "不要放在 Program Files 或其他只读位置。" % (APP_DIR, e),
+                parent=self.root)
+        except Exception:
+            pass
+
     # ---------- 文件读写 ----------
     def stat_now(self):
         try:
@@ -326,9 +357,15 @@ class App:
     def write_text(self, content):
         data = (b"\xef\xbb\xbf" if self.has_bom else b"") + content.encode("utf-8")
         tmp = self.file + ".todo_tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, self.file)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, self.file)
+        except OSError as e:
+            # 程序目录只读(如 Program Files)或文件被占用: 弹窗说明而不是静默丢失
+            self._warn_readonly(e)
+            self.log("write failed: %s" % e)
+            return
         self.last_seen = self.stat_now()
 
     def load_file(self):
@@ -874,8 +911,8 @@ class App:
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=1)
-        except Exception:
-            pass
+        except OSError as e:
+            self._warn_readonly(e)
 
     def on_close(self):
         try:

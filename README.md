@@ -18,6 +18,14 @@ pythonw todo.pyw [md文件路径]
 
 不带参数时读取 `config.json` 中记住的文件；没有配置时使用程序目录下的 `待办.md`。
 
+## 下载分发版（无需装 Python）
+
+到 [GitHub Releases](https://github.com/zwxdogs/desktop-todo/releases) 下载 `DesktopTodo-<版本>-win64.zip`，解压到任意**可写**目录（如桌面、D 盘；不要放 Program Files），双击 `DesktopTodo.exe` 即可。
+
+- 首次使用：右键 → 「更换文件…」选择你的 Markdown 清单，或在程序目录放一个 `待办.md`
+- 绿色便携：配置（`config.json`）和待办文件都在 exe 旁边，整个文件夹拷走即带走全部数据
+- 未签名，首次运行 SmartScreen 若提示，选「更多信息 → 仍要运行」
+
 ## 配置
 
 复制 `config.example.json` 为 `config.json`：
@@ -31,4 +39,5 @@ pythonw todo.pyw [md文件路径]
 ## 环境
 
 - Windows 10/11
-- Python 3（含 tkinter，标准库自带）
+- 源码运行：Python 3（含 tkinter，标准库自带）
+- 构建 exe：Python 3.12（py launcher）+ Pillow（生成图标，`gen_icon.py`）；PyInstaller 由 `build.ps1` 自动安装
