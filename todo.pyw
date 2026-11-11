@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 

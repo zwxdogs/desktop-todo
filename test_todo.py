@@ -56,7 +56,7 @@ class BaseDirTest(unittest.TestCase):
 
     def test_version_constant(self):
         mod = load_todo()
-        self.assertEqual(mod.APP_VERSION, "0.1.0")
+        self.assertRegex(mod.APP_VERSION, r"^\d+\.\d+\.\d+$")
 
 
 class SubtreeEndTest(unittest.TestCase):
