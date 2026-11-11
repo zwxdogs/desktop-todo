@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -251,6 +251,38 @@ def send_above_desktop(root):
     # 把桌面窗口垫到我们正下方(Progman 平时就在最底, 该调用通常只是保持原位)
     user32.SetWindowPos(progman, hwnd, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+
+def virtual_screen():
+    """虚拟屏幕(全部显示器)的物理像素范围 (x, y, w, h); 取不到时退回主屏。
+
+    本应用 DPI awareness=1 下实测: Tk 的 wm geometry / winfo_x() 坐标与这里的
+    物理像素 1:1 对应(DPI 缩放不改变坐标值), 因此可直接混用。
+    """
+    sm = user32.GetSystemMetrics
+    vx, vy, vw, vh = sm(76), sm(77), sm(78), sm(79)
+    if vw <= 0 or vh <= 0:
+        vx, vy, vw, vh = 0, 0, sm(0), sm(1)
+    return vx, vy, vw, vh
+
+
+def clamp_pos(x, y, w, h, vx, vy, vw, vh):
+    """把左上角 (x, y) 的 w×h 窗口夹回虚拟屏幕内, 返回新左上角; 已在屏内则原样返回。"""
+    nx = max(vx, min(x, vx + vw - w))
+    ny = max(vy, min(y, vy + vh - h))
+    return nx, ny
+
+
+def panel_pos(rx, ry, rw, pw, ph, vx, vy, vw, vh, gap):
+    """详情面板落点: 优先主窗口右侧, 右侧放不下放主窗口左侧, 再贴虚拟屏右缘;
+    y 对齐主窗口并夹回屏内。"""
+    px = rx + rw + gap
+    if px + pw > vx + vw:
+        px = rx - pw - gap
+    if px < vx:
+        px = max(vx, vx + vw - pw - gap)
+    py = max(vy, min(ry, vy + vh - ph - gap))
+    return px, py
 
 
 def at_desktop_level(root):
@@ -923,8 +955,9 @@ class App:
         except Exception:
             pass
         win.geometry("%dx%d+%d+%d" % (int(420 * s), int(520 * s),
-                     self.root.winfo_x() + self.root.winfo_width() + int(12 * s),
-                     max(0, self.root.winfo_y())))
+                     *panel_pos(self.root.winfo_x(), self.root.winfo_y(),
+                                self.root.winfo_width(), int(420 * s), int(520 * s),
+                                *virtual_screen(), int(12 * s))))
         win.protocol("WM_DELETE_WINDOW", self.close_panel)
         win.bind("<Escape>", lambda e: self.close_panel())
         self.log("panel open i=%d" % i)
@@ -1287,6 +1320,15 @@ class App:
                     self.log("restored from Win+D minimize")
                 elif not is_foreground(self.root) and not at_desktop_level(self.root):
                     send_above_desktop(self.root)
+            # 窗口被拖到屏幕外(拖过头/显示器热插拔/改分辨率)则拉回虚拟屏幕内
+            if not is_iconic(self.root):
+                wx, wy = self.root.winfo_x(), self.root.winfo_y()
+                nx, ny = clamp_pos(wx, wy,
+                                   self.root.winfo_width(), self.root.winfo_height(),
+                                   *virtual_screen())
+                if (nx, ny) != (wx, wy):
+                    self.root.geometry("+%d+%d" % (nx, ny))
+                    self.log("window off-screen -> rescued to %d,%d" % (nx, ny))
             cur = self.stat_now()
             if cur is None:
                 if not self.missing_shown and not self.raw_mode:
@@ -1423,7 +1465,7 @@ def main():
         y = test_pos[1] if test_pos else int(100 * s)
         w, h = int(430 * s), int(660 * s)
     else:
-        # config.json 里存的是物理像素; 首次运行按 DPI 缩放给出默认位置(屏幕右侧)
+        # config.json 里存的是物理像素; 首次运行按 DPI 缩放给出默认位置(主屏右侧)
         w = min(int(cfg["w"]), sw - 20) if "w" in cfg else int(380 * s)
         h = min(int(cfg["h"]), sh - 60) if "h" in cfg else int(640 * s)
         if "x" in cfg:
@@ -1431,10 +1473,10 @@ def main():
         else:
             x = sw - w - int(40 * s)
             y = int(100 * s)
-        x = max(0, min(x, sw - int(80 * s)))
-        y = max(0, min(y, sh - int(80 * s)))
         w = max(int(260 * s), w)
         h = max(int(180 * s), h)
+        # 夹回虚拟屏幕(全部显示器)内, 防止存档坐标落在屏外
+        x, y = clamp_pos(x, y, w, h, *virtual_screen())
     root.geometry("%dx%d+%d+%d" % (w, h, x, y))
     root.update_idletasks()
 

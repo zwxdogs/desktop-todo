@@ -184,5 +184,65 @@ class DeleteSubtreeTest(unittest.TestCase):
         self.assertEqual([ln.raw for ln in rest], ["- [ ] B\n"])
 
 
+class ClampPosTest(unittest.TestCase):
+    """窗口拉回 clamp_pos: 把左上角 (x,y) 的 w×h 窗口夹回虚拟屏幕内。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_inside_unchanged(self):
+        # 已在屏内(含贴边) 不动
+        self.assertEqual(self.mod.clamp_pos(100, 100, 430, 660, 0, 0, 1920, 1080),
+                         (100, 100))
+        self.assertEqual(self.mod.clamp_pos(1490, 420, 430, 660, 0, 0, 1920, 1080),
+                         (1490, 420))
+
+    def test_right_edge_sliver(self):
+        # 本机事故形态: 虚拟屏右缘 3840, 窗口 x=3062 w=760 -> 拉到 3080
+        self.assertEqual(self.mod.clamp_pos(3062, 697, 760, 1280, -3840, 0, 7680, 2160),
+                         (3062, 697))
+        self.assertEqual(self.mod.clamp_pos(3846, 697, 760, 1280, -3840, 0, 7680, 2160),
+                         (3080, 697))
+
+    def test_off_left_monitor(self):
+        # 负坐标屏(左屏)同样生效
+        self.assertEqual(self.mod.clamp_pos(-4000, 100, 430, 660, -3840, 0, 7680, 2160),
+                         (-3840, 100))
+
+    def test_window_bigger_than_screen(self):
+        # 窗口比屏幕还大 -> 贴左上角
+        self.assertEqual(self.mod.clamp_pos(50, 50, 8000, 3000, 0, 0, 1920, 1080),
+                         (0, 0))
+
+
+class PanelPosTest(unittest.TestCase):
+    """详情面板落点 panel_pos: 优先主窗口右侧, 放不下放左侧, 再贴虚拟屏右缘。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_right_side_normal(self):
+        # 主窗口在屏幕中部 -> 面板放右侧 gap=12
+        self.assertEqual(self.mod.panel_pos(300, 200, 430, 420, 520, 0, 0, 1920, 1080, 12),
+                         (742, 200))
+
+    def test_right_offscreen_falls_left(self):
+        # 本机事故形态: 挂件贴右屏边, 右侧放不下 -> 放挂件左侧
+        self.assertEqual(self.mod.panel_pos(3062, 697, 760, 420, 520, -3840, 0, 7680, 2160, 12),
+                         (2630, 697))
+
+    def test_left_also_offscreen_clamps_right_edge(self):
+        # 窄屏上挂件在最左缘 -> 右侧、左侧都放不下, 面板贴虚拟屏右缘
+        self.assertEqual(self.mod.panel_pos(0, 100, 200, 420, 520, 0, 0, 500, 1080, 12),
+                         (68, 100))
+
+    def test_y_clamped_bottom(self):
+        # y 超出下缘 -> 夹回
+        self.assertEqual(self.mod.panel_pos(100, 900, 430, 420, 520, 0, 0, 1920, 1080, 12),
+                         (542, 548))
+
+
 if __name__ == "__main__":
     unittest.main()
