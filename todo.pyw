@@ -57,6 +57,11 @@ C_HEADFG = "#3D76B5"
 C_ACCENT = "#4A8FE2"
 C_BOX    = "#B6BDC6"
 
+# 内联编辑 Entry 的统一样式(主列表/面板/标题改名共用)
+ENTRY_STYLE = dict(bg="#FFFFFF", fg=C_TEXT, relief="solid", bd=1,
+                   highlightthickness=1,
+                   highlightbackground=C_ACCENT, highlightcolor=C_ACCENT)
+
 # ---------------- Markdown 行解析 ----------------
 RE_BLANK  = re.compile(r"^\s*$")
 RE_HEADER = re.compile(r"^(\s*)\*\*(.+?)\*\*\s*$")
@@ -141,6 +146,58 @@ def child_indent(line):
     else:
         n = line.indent_units() + len(line.marker) + 2
     return " " * n
+
+
+def subtree_end(lines, i):
+    """待办 lines[i] 的子块结束位置（不含）。
+
+    子块 = 其后所有缩进更深（indent_units 按 expandtabs(4) 折算）的连续行：
+    中间的空行和 other 行不打断子块（other 行解析不出缩进，随其后的子行一起圈入），
+    但块尾的空行/other 行不算子块；
+    缩进 <= 父的行截断子块；分组标题（header）无论缩进多深都截断。
+    i 越界或不是待办时返回 i+1。
+    """
+    if not 0 <= i < len(lines) or lines[i].kind != "todo":
+        return i + 1
+    base = lines[i].indent_units()
+    end = i + 1
+    j = i + 1
+    while j < len(lines):
+        ln = lines[j]
+        if ln.kind in ("blank", "other"):
+            j += 1                      # 空行/other 暂不放行，只有后续子行才把它圈进来
+            continue
+        if ln.kind == "header":
+            break                       # 分组标题是硬边界
+        if ln.kind != "other" and ln.indent_units() > base:
+            j += 1
+            end = j                     # 只有真实子行才推进块尾
+            continue
+        break
+    return end
+
+
+def subtree_stats(lines, i):
+    """待办 lines[i] 子树的 (待办总数, 已完成数, 备注数)，递归统计。
+
+    供主列表徽标（如「✓2/5 📝3」）使用；父待办自身不计入。
+    """
+    end = subtree_end(lines, i)
+    todos = done = notes = 0
+    for ln in lines[i + 1:end]:
+        if ln.kind == "todo":
+            todos += 1
+            if ln.checked:
+                done += 1
+        elif ln.kind == "note":
+            notes += 1
+    return todos, done, notes
+
+
+def delete_subtree(lines, i):
+    """删除待办 lines[i] 及其整个子块，返回新列表（不修改原列表）。"""
+    end = subtree_end(lines, i)
+    return lines[:i] + lines[end:]
 
 
 # ---------------- Win32: 伪桌面层 ----------------
@@ -239,6 +296,16 @@ class App:
         self.rows = {}
         self.edit_entry = None
         self.edit_index = -1
+        # --- 详情面板状态 ---
+        self.panel = None            # 详情面板 Toplevel（单实例）
+        self.panel_todo = -1         # 面板对应的待办行下标
+        self.panel_anchor = ("", 0)  # (待办文字, 缩进) 外部重载后重定位锚
+        self.p_rows = {}
+        self.p_edit_entry = None
+        self.p_edit_index = -1
+        self.p_rename_entry = None
+        self.p_title_lbl = None
+        self.p_title_pack = {}
         self.missing_shown = False
         self.undo_stack = []
         self._dx = self._dy = 0
@@ -298,7 +365,9 @@ class App:
                                 yscrollincrement=int(26 * s))
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-3>", self.menu_global, add="+")
-        self.canvas.bind("<MouseWheel>", self._on_wheel, add="+")
+        self.canvas.bind("<MouseWheel>",
+                         lambda e: self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units"),
+                         add="+")
         self.list_frame = tk.Frame(self.canvas, bg=C_BG)
         self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw", tags=("inner",))
         self.list_frame.bind("<Configure>",
@@ -388,7 +457,7 @@ class App:
             self.text.insert("1.0", text)
             self.text.yview_moveto(pos)
         else:
-            self.render_list()
+            self.render_list()   # 面板刷新在 render_list 末尾统一跟进
         self.log("loaded %d lines from %s" % (len(self.lines), self.file))
 
     def show_missing(self):
@@ -402,7 +471,7 @@ class App:
                        bg=C_BG, fg=C_NOTE, font=self.f_item, justify="left",
                        wraplength=int(300 * self.s))
         lbl.pack(pady=int(40 * self.s), padx=int(16 * self.s))
-        self._wheel_bind(lbl)
+        self._bind_wheel_tree(lbl, self.canvas)
 
     # ---------- 渲染清单 ----------
     def render_list(self):
@@ -412,18 +481,24 @@ class App:
         for w in self.list_frame.winfo_children():
             w.destroy()
         self.rows = {}
-        for i, ln in enumerate(self.lines):
-            self.build_row(i, ln)
+        i = 0
+        while i < len(self.lines):
+            self.build_row(i, self.lines[i])
+            if self.lines[i].kind == "todo":
+                i = subtree_end(self.lines, i)   # 待办的整个子块收进详情面板
+            else:
+                i += 1
         tail = tk.Frame(self.list_frame, bg=C_BG, height=int(28 * self.s))
         tail.pack(fill="x")
         self.list_frame.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.canvas.yview_moveto(y)
-        self._update_wrap()
-        self._wheel_bind(self.list_frame)
+        self._update_wrap_for(self.canvas, self.rows)
+        self._bind_wheel_tree(self.list_frame, self.canvas)
+        self.refresh_panel()   # 主列表是清单渲染的唯一出口, 面板在此统一跟随刷新
         if self.testing:
             for i, ln in enumerate(self.lines):
-                if ln.kind == "todo":
+                if ln.kind == "todo" and i in self.rows:
                     b = self.rows[i]["box"]
                     self.log("todo i=%d checked=%s box screen=%d,%d"
                              % (i, ln.checked, b.winfo_rootx(), b.winfo_rooty()))
@@ -457,6 +532,23 @@ class App:
                 box.bind("<Button-1>", lambda e, i=i: self.toggle_line(i))
                 box.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
                 info["box"] = box
+                # 子树徽标「✓2/5 📝3」: 递归统计整棵子树, 点按打开详情面板
+                td, dn, nt = subtree_stats(self.lines, i)
+                if td or nt:
+                    parts = []
+                    if td:
+                        parts.append("✓%d/%d" % (dn, td))
+                    if nt:
+                        parts.append("📝%d" % nt)
+                    btxt = " ".join(parts)
+                    badge = tk.Label(row, text=btxt, bg=C_BG, fg=C_NOTE,
+                                     font=self.f_btn, cursor="hand2")
+                    badge.pack(side="right", padx=(0, int(10 * s)))
+                    badge.bind("<Button-1>", lambda e, i=i: self.open_panel(i))
+                    info["badge"] = badge
+                    # todo 行 wrap_pad=pad+勾选框(18s+7s), 再加实测徽标宽+右边距
+                    info["wrap_pad"] = pad + int(18 * s) + int(7 * s) \
+                        + self.f_btn.measure(btxt) + int(10 * s)
             elif ln.kind == "note":
                 pad += int(16 * s)
             font = (self.f_item_done if ln.checked else self.f_item) \
@@ -480,7 +572,11 @@ class App:
             info["pack"] = {"side": "left", "fill": "x", "expand": True,
                             "padx": (0 if ln.kind == "todo" else pad, int(12 * s)),
                             "pady": int(2 * s)}
-            lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
+            if ln.kind == "todo":
+                # 双击待办 = 打开详情面板(内联改名改走右键菜单的「编辑」)
+                lbl.bind("<Double-Button-1>", lambda e, i=i: self.open_panel(i))
+            else:
+                lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
             lbl.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
         self.rows[i] = info
 
@@ -497,25 +593,24 @@ class App:
         else:
             canvas.create_rectangle(a, a, b, b, outline=C_BOX, width=int(1 * s) + 1)
 
-    def _wheel_bind(self, w):
-        w.bind("<MouseWheel>", self._on_wheel, add="+")
+    def _bind_wheel_tree(self, w, canvas):
+        """把滚轮事件绑到 w 及其所有子件, 滚动指定画布(主列表/面板共用)。"""
+        w.bind("<MouseWheel>",
+               lambda e: canvas.yview_scroll(int(-e.delta / 120) * 2, "units"), add="+")
         for c in w.winfo_children():
-            self._wheel_bind(c)
-
-    def _on_wheel(self, e):
-        self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
+            self._bind_wheel_tree(c, canvas)
 
     def _on_canvas_configure(self, e):
         self.canvas.itemconfigure("inner", width=e.width)
-        self._update_wrap()
+        self._update_wrap_for(self.canvas, self.rows)
 
-    def _update_wrap(self):
-        """按当前窗口宽度给每行文字设置自动换行宽度。"""
-        w = self.canvas.winfo_width()
+    def _update_wrap_for(self, canvas, rows):
+        """按指定窗口宽度给每行文字设置自动换行宽度(主列表/面板共用)。"""
+        w = canvas.winfo_width()
         if w <= 10:
             return
         right = int(30 * self.s)
-        for info in self.rows.values():
+        for info in rows.values():
             lbl = info.get("lbl")
             if lbl is not None:
                 lbl.configure(wraplength=max(80, int(w - info.get("wrap_pad", 0) - right)))
@@ -538,9 +633,7 @@ class App:
         ln = self.lines[i]
         self.log("edit_row i=%d" % i)
         lbl = rw["lbl"]
-        ent = tk.Entry(rw["row"], font=rw.get("font", self.f_item), bg="#FFFFFF", fg=C_TEXT,
-                       relief="solid", bd=1, highlightthickness=1,
-                       highlightbackground=C_ACCENT, highlightcolor=C_ACCENT)
+        ent = tk.Entry(rw["row"], font=rw.get("font", self.f_item), **ENTRY_STYLE)
         lbl.pack_forget()
         ent.pack(**rw["pack"])
         ent.insert(0, ln.text)
@@ -582,24 +675,45 @@ class App:
             except Exception:
                 pass
 
-    def insert_line(self, i, kind, indent, text=""):
-        """在第 i 行之后插入一行（i=-1 表示最前）。"""
+    def insert_line(self, i, kind, indent, text="", edit_after=None, pos=None):
+        """在第 i 行之后插入一行（i=-1 表示最前）。
+
+        pos 覆盖插入位置(新行插在其后一行)，例如插到整个子块末尾；
+        edit_after 指随后的内联编辑回调，默认主列表 edit_row，面板传 self.p_edit。
+        """
         self.push_undo()
-        if 0 <= i < len(self.lines) and not self.lines[i].raw.endswith("\n"):
-            self.lines[i].raw += self.nl
+        ref = i if pos is None else pos
+        if 0 <= ref < len(self.lines) and not self.lines[ref].raw.endswith("\n"):
+            self.lines[ref].raw += self.nl
         raw = indent + ("- [ ] " if kind == "todo" else "- ") + text + self.nl
-        self.lines.insert(i + 1, parse_line(raw))
+        at = (i if pos is None else pos) + 1
+        self.lines.insert(at, parse_line(raw))
         self.render_list()
         self.schedule_save()
-        self.root.after(30, lambda: self.edit_row(i + 1))
+        edit = edit_after or self.edit_row
+        self.root.after(30, lambda: edit(at))
 
     def delete_line(self, i):
+        """删除第 i 行；待办连同其整个子块一起删除（Ctrl+Z 可撤销）。"""
         if not 0 <= i < len(self.lines):
             return
-        if self.edit_index == i:
-            self.edit_entry = None
         self.push_undo()
-        self.lines.pop(i)
+        ln = self.lines[i]
+        if ln.kind == "todo":
+            end = subtree_end(self.lines, i)
+            if i <= self.edit_index < end:        # 正在编辑的行随子块一起删除
+                self.edit_entry = None
+            if i <= self.p_edit_index < end:
+                self.p_edit_entry = None
+            if self.panel is not None and i <= self.panel_todo < end:
+                self.close_panel()                # 面板对应的待办被删 → 关面板
+            self.lines = delete_subtree(self.lines, i)
+        else:
+            if self.edit_index == i:
+                self.edit_entry = None
+            if self.p_edit_index == i:
+                self.p_edit_entry = None
+            self.lines.pop(i)
         self.render_list()
         self.schedule_save()
 
@@ -645,7 +759,8 @@ class App:
 
     def undo(self, event=None):
         """Ctrl+Z: 撤回最近一次清单改动(勾选/改字/插入/删除)。"""
-        if self.raw_mode or self.edit_entry is not None or not self.undo_stack:
+        if self.raw_mode or self.edit_entry is not None \
+                or self.p_edit_entry is not None or not self.undo_stack:
             return
         snap = self.undo_stack.pop()
         try:
@@ -704,6 +819,7 @@ class App:
         if self.raw_mode:
             return
         self.close_editor()
+        self.close_panel()   # 原文模式下关掉面板, 避免内容失联
         self.raw_mode = True
         self.btn_mode.config(text="清单")
         self.canvas.pack_forget()
@@ -761,9 +877,10 @@ class App:
             m.add_command(label="删除分组标题", command=lambda: self.delete_line(i))
         elif ln.kind == "todo":
             m.add_command(label="在下方插入待办",
-                          command=lambda: self.insert_line(i, "todo", ln.indent, "新待办"))
-            m.add_command(label="在下方插入子待办",
-                          command=lambda: self.insert_line(i, "todo", child_indent(ln), "新待办"))
+                          command=lambda: self.insert_line(
+                              i, "todo", ln.indent, "新待办",
+                              pos=subtree_end(self.lines, i) - 1))  # 插到整块之后, 不把旧子块过继给新待办
+            m.add_command(label="打开详情面板", command=lambda: self.open_panel(i))
             m.add_command(label="在下方插入分组", command=lambda: self.insert_group(i))
             m.add_separator()
             m.add_command(label="编辑", command=lambda: self.edit_row(i))
@@ -780,6 +897,316 @@ class App:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    # ---------- 详情面板 ----------
+    def _panel_locate(self):
+        """按锚(待办文字+缩进)重找面板对应待办的行下标；找不到返回 -1。"""
+        text, units = self.panel_anchor
+        for k, ln in enumerate(self.lines):
+            if ln.kind == "todo" and ln.text == text and ln.indent_units() == units:
+                return k
+        return -1
+
+    def open_panel(self, i):
+        """打开待办详情面板(单实例, 新开替换旧的)。"""
+        ln = self.lines[i]
+        self.close_panel()
+        self.panel_anchor = (ln.text, ln.indent_units())
+        self.panel_todo = i
+        s = self.s
+        win = self.panel = tk.Toplevel(self.root)
+        win.configure(bg=C_BG)
+        win.title(ln.text)
+        win.transient(self.root)
+        try:
+            set_toolwindow(win)
+        except Exception:
+            pass
+        win.geometry("%dx%d+%d+%d" % (int(420 * s), int(520 * s),
+                     self.root.winfo_x() + self.root.winfo_width() + int(12 * s),
+                     max(0, self.root.winfo_y())))
+        win.protocol("WM_DELETE_WINDOW", self.close_panel)
+        win.bind("<Escape>", lambda e: self.close_panel())
+        self.log("panel open i=%d" % i)
+
+        # 标题栏: 待办文字(双击改名) + 关闭
+        hdr = tk.Frame(win, bg=C_HEADER, height=int(34 * s))
+        hdr.pack(fill="x", side="top")
+        hdr.pack_propagate(False)
+        self.p_title_pack = {"side": "left", "fill": "x", "expand": True,
+                             "padx": (int(10 * s), int(4 * s)), "pady": int(4 * s)}
+        self.p_title_lbl = tk.Label(hdr, text=ln.text, bg=C_HEADER, fg=C_TEXT,
+                                    font=self.f_btn, anchor="w")
+        self.p_title_lbl.pack(**self.p_title_pack)
+        self.p_title_lbl.bind("<Double-Button-1>", lambda e: self.p_rename())
+        xb = tk.Label(hdr, text="✕", bg=C_HEADER, fg="#5A6472", font=self.f_btn,
+                      padx=int(7 * s), cursor="hand2")
+        xb.pack(side="right", padx=(0, int(6 * s)))
+        xb.bind("<Button-1>", lambda e: self.close_panel())
+
+        # 内容区: 滚动画布 + 行容器
+        self.p_canvas = tk.Canvas(win, bg=C_BG, highlightthickness=0,
+                                  yscrollincrement=int(26 * s))
+        self.p_canvas.pack(fill="both", expand=True)
+        self.p_frame = tk.Frame(self.p_canvas, bg=C_BG)
+        self.p_canvas.create_window((0, 0), window=self.p_frame, anchor="nw",
+                                    tags=("pinner",))
+        self.p_frame.bind(
+            "<Configure>",
+            lambda e: self.p_canvas.configure(scrollregion=self.p_canvas.bbox("all")))
+        self.p_canvas.bind(
+            "<Configure>",
+            lambda e: (self.p_canvas.itemconfigure("pinner", width=e.width),
+                       self._update_wrap_for(self.p_canvas, self.p_rows)))
+
+        # 底栏: 添加备注
+        bar = tk.Frame(win, bg=C_BG)
+        bar.pack(fill="x", side="bottom")
+        add = tk.Label(bar, text="＋ 添加备注", bg=C_BG, fg=C_ACCENT, font=self.f_btn,
+                       cursor="hand2", padx=int(10 * s), pady=int(6 * s))
+        add.pack(side="left")
+        add.bind("<Button-1>", lambda e: self.p_add_note())
+
+        self.render_panel()
+
+    def close_panel(self):
+        if self.panel is None:
+            return
+        win = self.panel
+        self.panel = None
+        self.panel_todo = -1
+        self.p_rows = {}
+        self.p_edit_entry = None
+        self.p_edit_index = -1
+        self.p_rename_entry = None
+        self.p_title_lbl = None
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        self.log("panel closed")
+
+    def refresh_panel(self):
+        """清单变化后面板跟随重渲染；对应待办被删则关闭面板。"""
+        if self.panel is not None:
+            self.render_panel()
+
+    def render_panel(self):
+        if self.panel is None:
+            return
+        i = self._panel_locate()
+        if i < 0:
+            self.log("panel target gone -> close")
+            self.close_panel()
+            return
+        self.panel_todo = i
+        self._p_close_editor()
+        self._p_restore_title()
+        ln = self.lines[i]
+        self.p_title_lbl.config(text=ln.text)
+        try:
+            self.panel.title(ln.text)
+        except Exception:
+            pass
+        y = self.p_canvas.yview()[0]
+        for w in self.p_frame.winfo_children():
+            w.destroy()
+        self.p_rows = {}
+        end = subtree_end(self.lines, i)
+        base = ln.indent_units()
+        for j in range(i + 1, end):
+            self.p_build_row(j, self.lines[j].indent_units() - base)
+        tail = tk.Frame(self.p_frame, bg=C_BG, height=int(20 * self.s))
+        tail.pack(fill="x")
+        self.p_frame.update_idletasks()
+        self.p_canvas.configure(scrollregion=self.p_canvas.bbox("all"))
+        self.p_canvas.yview_moveto(y)
+        self._update_wrap_for(self.p_canvas, self.p_rows)
+        self._bind_wheel_tree(self.p_frame, self.p_canvas)
+
+    def p_build_row(self, j, depth):
+        """面板行：depth 为相对面板根待办的缩进级数。"""
+        s = self.s
+        ln = self.lines[j]
+        f = self.p_frame
+        if ln.kind == "blank":
+            tk.Frame(f, bg=C_BG, height=int(6 * s)).pack(fill="x")
+            return
+        pad = int(12 * s) + min(depth * int(7 * s), int(160 * s))
+        row = tk.Frame(f, bg=C_BG)
+        row.pack(fill="x")
+        info = {"row": row, "lbl": None, "box": None}
+
+        if ln.kind == "todo":
+            box = tk.Canvas(row, width=int(18 * s), height=int(18 * s),
+                            bg=C_BG, highlightthickness=0, cursor="hand2")
+            box.pack(side="left", padx=(pad, int(7 * s)), pady=int(4 * s))
+            self.draw_box(box, ln.checked)
+            box.bind("<Button-1>", lambda e, j=j: self.toggle_line(j))
+            box.bind("<Button-3>", lambda e, j=j: self.p_menu(e, j))
+            info["box"] = box
+        elif ln.kind == "note":
+            pad += int(16 * s)
+        font = (self.f_item_done if ln.checked else self.f_item) \
+            if ln.kind == "todo" else \
+            (self.f_note_done if ln.checked else self.f_note)
+        fg = (C_DONE if ln.checked else C_TEXT) if ln.kind == "todo" else \
+             (C_DONE if ln.checked else C_NOTE)
+        if ln.kind == "other":
+            fg = C_TEXT
+            font = self.f_item
+        # 备注显示为无序列表圆点(仅显示用, 不写入文件)
+        text_disp = ("• " + ln.text) if ln.kind == "note" else ln.text
+        lbl = tk.Label(row, text=text_disp, bg=C_BG, fg=fg, font=font,
+                       anchor="w", justify="left")
+        info["wrap_pad"] = pad + (int(18 * s) + int(7 * s) if ln.kind == "todo" else 0)
+        lbl.pack(side="left", fill="x", expand=True,
+                 padx=(0 if ln.kind == "todo" else pad, int(12 * s)), pady=int(2 * s))
+        info["lbl"] = lbl
+        info["font"] = font
+        info["pack"] = {"side": "left", "fill": "x", "expand": True,
+                        "padx": (0 if ln.kind == "todo" else pad, int(12 * s)),
+                        "pady": int(2 * s)}
+        lbl.bind("<Double-Button-1>", lambda e, j=j: self.p_edit(j))
+        lbl.bind("<Button-3>", lambda e, j=j: self.p_menu(e, j))
+        self.p_rows[j] = info
+
+    def p_edit(self, j):
+        if self.panel is None or self.raw_mode:
+            return
+        rw = self.p_rows.get(j)
+        if not rw or not rw["lbl"]:
+            return
+        ln = self.lines[j]
+        lbl = rw["lbl"]
+        ent = tk.Entry(rw["row"], font=rw.get("font", self.f_item), **ENTRY_STYLE)
+        lbl.pack_forget()
+        ent.pack(**rw["pack"])
+        ent.insert(0, ln.text)
+        ent.select_range(0, "end")
+        ent.icursor("end")
+        ent.focus_set()
+        self.p_edit_entry = ent
+        self.p_edit_index = j
+
+        def commit(event=None):
+            if self.p_edit_entry is not ent:
+                return
+            val = ent.get()
+            self.p_edit_entry = None
+            self.push_undo()
+            set_line_text(self.lines[j], val)
+            self.render_list()
+            self.schedule_save()
+
+        def cancel(event=None):
+            if self.p_edit_entry is not ent:
+                return
+            self.p_edit_entry = None
+            self.render_panel()
+
+        ent.bind("<Return>", commit)
+        ent.bind("<KP_Enter>", commit)
+        ent.bind("<Escape>", cancel)
+        ent.bind("<FocusOut>", commit)
+
+    def _p_close_editor(self):
+        """提交面板里未定稿的内联编辑(不触发重渲染)。"""
+        if self.p_edit_entry is not None and 0 <= self.p_edit_index < len(self.lines):
+            ent = self.p_edit_entry
+            self.p_edit_entry = None
+            try:
+                self.push_undo()
+                set_line_text(self.lines[self.p_edit_index], ent.get())
+                self.schedule_save()
+            except Exception:
+                pass
+
+    def p_rename(self):
+        """双击面板标题栏: 内联 Entry 改根待办文字。"""
+        i = self.panel_todo
+        if not 0 <= i < len(self.lines) or self.p_rename_entry is not None:
+            return
+        lbl = self.p_title_lbl
+        ent = tk.Entry(lbl.master, font=self.f_btn, **ENTRY_STYLE)
+        lbl.pack_forget()
+        ent.pack(side="left", fill="x", expand=True,
+                 padx=self.p_title_pack["padx"], pady=self.p_title_pack["pady"],
+                 ipady=int(2 * self.s))
+        ent.insert(0, self.lines[i].text)
+        ent.select_range(0, "end")
+        ent.icursor("end")
+        ent.focus_set()
+        self.p_rename_entry = ent
+
+        def commit(event=None):
+            if self.p_rename_entry is not ent:
+                return
+            val = ent.get()
+            self.p_rename_entry = None
+            self._p_restore_title()
+            self.push_undo()
+            set_line_text(self.lines[i], val)
+            # 同步重定位锚, 否则改名后 _panel_locate 找不到行 → 面板自毁
+            self.panel_anchor = (self.lines[i].text, self.lines[i].indent_units())
+            self.render_list()
+            self.schedule_save()
+
+        def cancel(event=None):
+            if self.p_rename_entry is not ent:
+                return
+            self.p_rename_entry = None
+            self._p_restore_title()
+
+        ent.bind("<Return>", commit)
+        ent.bind("<KP_Enter>", commit)
+        ent.bind("<Escape>", cancel)
+        ent.bind("<FocusOut>", commit)
+
+    def _p_restore_title(self):
+        if self.p_rename_entry is not None:
+            try:
+                self.p_rename_entry.destroy()
+            except Exception:
+                pass
+            self.p_rename_entry = None
+        if self.p_title_lbl is not None:
+            try:
+                self.p_title_lbl.pack(**self.p_title_pack)
+            except Exception:
+                pass
+
+    def p_menu(self, event, j):
+        ln = self.lines[j]
+        m = tk.Menu(self.panel, tearoff=0, font=self.f_btn)
+        if ln.kind == "todo":
+            m.add_command(label="在此条目下插入子待办",
+                          command=lambda: self.insert_line(j, "todo", child_indent(ln),
+                                                           "新待办", edit_after=self.p_edit))
+            m.add_command(label="在此条目下插入备注",
+                          command=lambda: self.insert_line(j, "note", child_indent(ln),
+                                                           "", edit_after=self.p_edit))
+            m.add_separator()
+            m.add_command(label="编辑", command=lambda: self.p_edit(j))
+            m.add_command(label="删除（连同子内容）", command=lambda: self.delete_line(j))
+        elif ln.kind == "note":
+            m.add_command(label="编辑", command=lambda: self.p_edit(j))
+            m.add_command(label="删除", command=lambda: self.delete_line(j))
+        else:
+            return
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def p_add_note(self):
+        """把一条新备注追加到子块末尾, 并立即进入内联编辑。"""
+        i = self.panel_todo
+        if not 0 <= i < len(self.lines):
+            return
+        pos = subtree_end(self.lines, i) - 1   # 子块最后一行(块为空时即根待办自身)
+        self.insert_line(pos, "note", child_indent(self.lines[i]), "",
+                         edit_after=self.p_edit)
 
     def _next_todo_indent(self, i):
         """分组标题后的第一条待办缩进：跟随已有的下一条待办，否则顶格。"""
@@ -920,6 +1347,10 @@ class App:
             if self.edit_entry is not None:
                 self.close_editor()
                 self.do_save()
+            if self.p_edit_entry is not None:
+                self._p_close_editor()
+                self.do_save()
+            self.close_panel()
             if self.raw_mode:
                 if self.raw_save_job:
                     self.root.after_cancel(self.raw_save_job)

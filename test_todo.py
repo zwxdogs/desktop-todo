@@ -59,5 +59,130 @@ class BaseDirTest(unittest.TestCase):
         self.assertEqual(mod.APP_VERSION, "0.1.0")
 
 
+class SubtreeEndTest(unittest.TestCase):
+    """子块扫描 subtree_end: 待办的子块边界(详情面板功能的地基)。
+
+    子块 = 待办之后所有缩进更深(按 expandtabs(4) 折算)的连续行;
+    中间的空行和 other 行不打断子块, 块尾空行/other 行不算子块;
+    缩进 <= 父的行截断子块, 分组标题无论缩进多深都截断。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_no_children(self):
+        lines = self.mod.parse_text("- [ ] 父\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 1)
+
+    def test_basic_children(self):
+        lines = self.mod.parse_text(
+            "- [ ] 父\n  - [ ] 子1\n  - [x] 子2\n  - 备注\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 4)
+
+    def test_interior_blank_keeps_block(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n\n  - 备注\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 4)
+
+    def test_trailing_blank_excluded(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 2)
+
+    def test_deeper_header_terminates(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n  **小标题**\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 2)
+
+    def test_tab_indent_is_child(self):
+        lines = self.mod.parse_text("- [ ] 父\n\t- 子\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 2)
+
+    def test_eof_end(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 2)
+
+    def test_interior_other_keeps_block(self):
+        # 子块中间的普通段落行(other)不打断子块, 其后的子行照常圈入
+        lines = self.mod.parse_text("- [ ] 父\n  普通段落\n  - [ ] 子\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 3)
+
+    def test_trailing_other_excluded(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n普通段落\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_end(lines, 0), 2)
+
+
+class SubtreeStatsTest(unittest.TestCase):
+    """徽标统计 subtree_stats: 子树内 (待办总数, 已完成数, 备注数) 递归统计。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_mixed_recursive(self):
+        lines = self.mod.parse_text(
+            "- [ ] 父\n"
+            "  - [ ] 子1\n"
+            "  - [x] 子2\n"
+            "    - [ ] 孙\n"
+            "  - 备注1\n"
+            "  - 备注2\n")
+        self.assertEqual(self.mod.subtree_stats(lines, 0), (3, 1, 2))
+
+    def test_notes_only(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 备注1\n  - 备注2\n")
+        self.assertEqual(self.mod.subtree_stats(lines, 0), (0, 0, 2))
+
+    def test_no_children(self):
+        lines = self.mod.parse_text("- [ ] 父\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.subtree_stats(lines, 0), (0, 0, 0))
+
+    def test_checked_x_counts_done(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - [X] 子\n")
+        self.assertEqual(self.mod.subtree_stats(lines, 0), (1, 1, 0))
+
+    def test_deep_nested_all_counted(self):
+        lines = self.mod.parse_text(
+            "- [ ] 父\n"
+            "  - [x] 子\n"
+            "    - [x] 孙\n"
+            "      - 曾孙备注\n")
+        self.assertEqual(self.mod.subtree_stats(lines, 0), (2, 2, 1))
+
+
+class DeleteSubtreeTest(unittest.TestCase):
+    """整树删除 delete_subtree: 移除待办及其子块，返回新列表不动原列表。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_removes_block(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - 子\n- [ ] 下一个\n**分组**\n")
+        rest = self.mod.delete_subtree(lines, 0)
+        self.assertEqual([ln.raw for ln in rest], ["- [ ] 下一个\n", "**分组**\n"])
+
+    def test_keeps_lines_before(self):
+        lines = self.mod.parse_text("- [ ] A\n- [ ] 父\n  - 子\n- [ ] B\n")
+        rest = self.mod.delete_subtree(lines, 1)
+        self.assertEqual([ln.raw for ln in rest], ["- [ ] A\n", "- [ ] B\n"])
+
+    def test_delete_last_todo(self):
+        lines = self.mod.parse_text("- [ ] A\n- [ ] 父\n  - 子\n")
+        rest = self.mod.delete_subtree(lines, 1)
+        self.assertEqual([ln.raw for ln in rest], ["- [ ] A\n"])
+
+    def test_original_untouched(self):
+        src = "- [ ] A\n- [ ] 父\n  - 子\n  - 备注\n"
+        lines = self.mod.parse_text(src)
+        self.mod.delete_subtree(lines, 1)
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(self.mod.serialize(lines), src)
+
+    def test_deletes_deeper_subtree(self):
+        lines = self.mod.parse_text(
+            "- [ ] 父\n  - [ ] 子\n    - [ ] 孙\n      - 备注\n- [ ] B\n")
+        rest = self.mod.delete_subtree(lines, 0)
+        self.assertEqual([ln.raw for ln in rest], ["- [ ] B\n"])
+
+
 if __name__ == "__main__":
     unittest.main()
