@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -208,6 +208,8 @@ user32 = ctypes.windll.user32
 
 HWND_BOTTOM = 1
 GW_HWNDPREV = 3
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
 SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x0010, 0x0020, 0x0040
 
@@ -233,7 +235,7 @@ def desktop_hwnd():
 def set_toolwindow(root):
     """WS_EX_TOOLWINDOW: 不出现在任务栏和 Alt+Tab。"""
     hwnd = toplevel_hwnd(root)
-    GWL_EXSTYLE, WS_EX_TOOLWINDOW = -20, 0x00000080
+    WS_EX_TOOLWINDOW = 0x00000080
     ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     _set_window_long(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW)
     user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
@@ -949,11 +951,18 @@ class App:
         win = self.panel = tk.Toplevel(self.root)
         win.configure(bg=C_BG)
         win.title(ln.text)
-        win.transient(self.root)
-        try:
-            set_toolwindow(win)
-        except Exception:
-            pass
+        # 不用 transient(owner 关系): poll 贴桌面的 SetWindowPos(HWND_BOTTOM)
+        # 会把 owned 面板一起拖下水并剥掉 TOPMOST 位(Windows owned 链重排)。
+        # 面板保持独立顶层窗口, 不进任务栏/Alt+Tab 由下方 set_toolwindow 保证。
+        # TOOLWINDOW 样式须在映射后再写: 去掉 transient 后 Tk 会在映射时
+        # 按 wm 状态重算 exstyle, 映射前的 Win32 写入会被洗掉 → 进任务栏。
+        def _apply_toolwindow(_e=None):
+            try:
+                set_toolwindow(win)
+            except Exception:
+                pass
+        _apply_toolwindow()
+        win.bind("<Map>", _apply_toolwindow, add="+")
         # 浮在其他窗口之上(用户要求面板始终可见); 主挂件仍贴桌面底层不受影响
         try:
             win.attributes("-topmost", True)
@@ -1330,6 +1339,7 @@ class App:
                 elif not is_foreground(self.root) and not at_desktop_level(self.root):
                     send_above_desktop(self.root)
             # 窗口被拖到屏幕外(拖过头/显示器热插拔/改分辨率)则拉回虚拟屏幕内
+            self._panel_restore_topmost()
             if not is_iconic(self.root):
                 wx, wy = self.root.winfo_x(), self.root.winfo_y()
                 nx, ny = clamp_pos(wx, wy,
@@ -1354,6 +1364,23 @@ class App:
         self.root.after(1000, self.poll)
 
     # ---------- 窗口拖动/缩放 ----------
+    def _panel_restore_topmost(self):
+        """详情面板 WS_EX_TOPMOST 被系统剥除时的兜底自愈(幂等, 每 poll 一发)。
+
+        Win32 层直读样式位: Tk 的 attributes('-topmost') 是内部状态,
+        Win32 位被剥时它仍返回 True, 不可信。
+        """
+        if self.panel is None:
+            return
+        hwnd = toplevel_hwnd(self.panel)
+        if not hwnd or (user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+            return
+        try:
+            self.panel.attributes("-topmost", True)
+        except Exception:
+            return
+        self.log("panel topmost stripped by system -> restored")
+
     def set_pos(self, sx, sy):
         """以屏幕坐标设置窗口位置（嵌入模式下换算为父窗口坐标）。"""
         self.root.geometry("+%d+%d" % (sx - self._pox, sy - self._poy))
