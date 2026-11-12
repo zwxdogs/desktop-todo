@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -950,7 +950,10 @@ class App:
         s = self.s
         win = self.panel = tk.Toplevel(self.root)
         win.configure(bg=C_BG)
-        win.title(ln.text)
+        # 无边框: 隐藏 Windows 原生标题栏(用户反馈其与自绘标题行重复),
+        # 面板只保留下方自绘标题行; 位置由 panel_pos 决定, 无系统拖动需求。
+        # overrideredirect 必须在映射前设置, 映射后再切会闪现原生边框。
+        win.overrideredirect(True)
         # 不用 transient(owner 关系): poll 贴桌面的 SetWindowPos(HWND_BOTTOM)
         # 会把 owned 面板一起拖下水并剥掉 TOPMOST 位(Windows owned 链重排)。
         # 面板保持独立顶层窗口, 不进任务栏/Alt+Tab 由下方 set_toolwindow 保证。
