@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -954,6 +954,11 @@ class App:
             set_toolwindow(win)
         except Exception:
             pass
+        # 浮在其他窗口之上(用户要求面板始终可见); 主挂件仍贴桌面底层不受影响
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
         win.geometry("%dx%d+%d+%d" % (int(420 * s), int(520 * s),
                      *panel_pos(self.root.winfo_x(), self.root.winfo_y(),
                                 self.root.winfo_width(), int(420 * s), int(520 * s),
@@ -1124,19 +1129,21 @@ class App:
 
         def commit(event=None):
             if self.p_edit_entry is not ent:
-                return
+                return "break"
             val = ent.get()
             self.p_edit_entry = None
             self.push_undo()
             set_line_text(self.lines[j], val)
             self.render_list()
             self.schedule_save()
+            return "break"
 
         def cancel(event=None):
             if self.p_edit_entry is not ent:
-                return
+                return "break"
             self.p_edit_entry = None
             self.render_panel()
+            return "break"  # 不传给面板级 <Escape>(否则取消编辑会连面板一起关)
 
         ent.bind("<Return>", commit)
         ent.bind("<KP_Enter>", commit)
@@ -1174,9 +1181,10 @@ class App:
 
         def commit(event=None):
             if self.p_rename_entry is not ent:
-                return
+                return "break"
             val = ent.get()
-            self.p_rename_entry = None
+            # 先销毁 Entry 并恢复标题(若先清状态再调, _p_restore_title 会跳过
+            # destroy 导致 Entry 泄漏在标题栏, 与标题共存)
             self._p_restore_title()
             self.push_undo()
             set_line_text(self.lines[i], val)
@@ -1184,12 +1192,13 @@ class App:
             self.panel_anchor = (self.lines[i].text, self.lines[i].indent_units())
             self.render_list()
             self.schedule_save()
+            return "break"
 
         def cancel(event=None):
             if self.p_rename_entry is not ent:
-                return
-            self.p_rename_entry = None
+                return "break"
             self._p_restore_title()
+            return "break"  # 不传给面板级 <Escape>(否则取消改名会连面板一起关)
 
         ent.bind("<Return>", commit)
         ent.bind("<KP_Enter>", commit)
