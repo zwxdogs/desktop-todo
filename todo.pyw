@@ -28,7 +28,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -57,7 +57,14 @@ C_NOTE   = "#8B929B"
 C_NOTE_T = "#57606A"   # 备注正文: 备注移进详情面板后不必再用次要灰
 C_HEADFG = "#3D76B5"
 C_ACCENT = "#4A8FE2"
-C_BOX    = "#B6BDC6"
+C_BOX    = "#C6CCD4"   # 未勾选方框: 比旧版浅一档, 配 2px 发丝边
+C_HOVER  = "#F2F5F8"   # 行 hover 底色
+C_PRESS  = "#E8EEF6"   # 行 pressed 底色
+C_RULE   = "#DFE4EA"   # 发丝分隔线(顶栏下/面板栏间)
+C_HAIRLINE = "#E1E6ED" # 窗体 1px 外描边
+C_GRIP   = "#A8B0BC"   # 右下缩放手柄
+C_BTN_HOVER = "#E3E8EF"
+C_BTN_PRESS = "#D7DEE7"
 
 # 内联编辑 Entry 的统一样式(主列表/面板/标题改名共用)
 ENTRY_STYLE = dict(bg="#FFFFFF", fg=C_TEXT, relief="solid", bd=1,
@@ -277,8 +284,8 @@ def send_above_desktop(root):
 def virtual_screen():
     """虚拟屏幕(全部显示器)的物理像素范围 (x, y, w, h); 取不到时退回主屏。
 
-    本应用 DPI awareness=1 下实测: Tk 的 wm geometry / winfo_x() 坐标与这里的
-    物理像素 1:1 对应(DPI 缩放不改变坐标值), 因此可直接混用。
+    本应用在 PerMonitorV2/system-aware 下实测: Tk 的 wm geometry / winfo_x()
+    坐标与这里的物理像素 1:1 对应(DPI 缩放不改变坐标值), 因此可直接混用。
     """
     sm = user32.GetSystemMetrics
     vx, vy, vw, vh = sm(76), sm(77), sm(78), sm(79)
@@ -371,9 +378,14 @@ class App:
 
         s = self.s = max(1.0, root.winfo_fpixels("1i") / 96.0)
         root.title(APP_NAME)
-        root.configure(bg=C_BG)
+        root.configure(bg=C_HAIRLINE)
         root.overrideredirect(True)
         root.minsize(int(260 * s), int(180 * s))
+
+        # 1px 外描边: 无边框窗口落在浅色壁纸上没有边界, 让 shell 内缩 1px
+        # 露出 root 底色; 不占额外布局, 也不影响拖动/缩放命中。
+        self.shell = tk.Frame(root, bg=C_BG)
+        self.shell.pack(fill="both", expand=True, padx=1, pady=1)
 
         self.f_item = tkfont.Font(family="Microsoft YaHei UI", size=10)
         self.f_item_done = tkfont.Font(family="Microsoft YaHei UI", size=10, overstrike=1)
@@ -383,10 +395,13 @@ class App:
         self.f_btn = tkfont.Font(family="Microsoft YaHei UI", size=9)
 
         # --- 顶栏(右→左: ✕ ↻ 📌 ＋) ---
-        hdr = tk.Frame(root, bg=C_HEADER, height=int(34 * s))
+        hdr = tk.Frame(self.shell, bg=C_HEADER, height=int(34 * s))
         hdr.pack(fill="x", side="top")
         hdr.pack_propagate(False)
         self.hdr = hdr
+        # 顶栏底色与正文只差 1.06:1, 用一条 1px 发丝线分界, 比加深整条栏更轻
+        hdr_rule = tk.Frame(self.shell, bg=C_RULE, height=1)
+        hdr_rule.pack(fill="x", side="top")
         self.lbl_title = tk.Label(hdr, text=APP_NAME, bg=C_HEADER, fg=C_TEXT,
                                   font=self.f_btn, cursor="fleur")
         self.lbl_title.pack(side="left", padx=(int(10 * s), 0))
@@ -411,6 +426,39 @@ class App:
                 box.move(tid, bw // 2 - (bb[0] + bb[2]) / 2.0,
                          bh // 2 - (bb[1] + bb[3]) / 2.0 - 1)
             box.glyph = tid
+            box.lit = False
+            box.hover = False
+
+            def _paint(bg, ink):
+                box.configure(bg=bg)
+                box.itemconfigure(tid, fill=ink)
+
+            def _enter(e):
+                box.hover = True
+                _paint(C_BTN_HOVER, C_TEXT)
+
+            def _leave(e):
+                box.hover = False
+                if box.lit:
+                    _paint("#DCE9FA", C_ACCENT)
+                else:
+                    _paint(C_HEADER, "#5A6472")
+
+            def _press(e):
+                _paint(C_BTN_PRESS, C_TEXT)
+
+            def _release(e):
+                if box.lit:
+                    _paint("#DCE9FA", C_ACCENT)
+                elif box.hover:
+                    _paint(C_BTN_HOVER, C_TEXT)
+                else:
+                    _paint(C_HEADER, "#5A6472")
+
+            box.bind("<Enter>", _enter, add="+")
+            box.bind("<Leave>", _leave, add="+")
+            box.bind("<ButtonPress-1>", _press, add="+")
+            box.bind("<ButtonRelease-1>", _release, add="+")
             box.bind("<Button-1>", lambda e: cmd())
             return box
 
@@ -430,7 +478,7 @@ class App:
             w.bind("<Button-3>", self.menu_title, add="+")
 
         # --- 清单区 ---
-        self.canvas = tk.Canvas(root, bg=C_BG, highlightthickness=0,
+        self.canvas = tk.Canvas(self.shell, bg=C_BG, highlightthickness=0,
                                 yscrollincrement=int(26 * s))
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-3>", self.menu_blank, add="+")
@@ -444,10 +492,14 @@ class App:
         self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
         self.list_frame.bind("<Button-3>", self.menu_blank, add="+")
 
-        # --- 右下角缩放把手 ---
-        self.grip = tk.Label(root, text="◢", bg=C_BG, fg="#C4CAD2", font=self.f_btn,
-                             cursor="bottom_right_corner")
-        self.grip.place(relx=1.0, rely=1.0, anchor="se")
+        # --- 右下角缩放把手(3 条斜线; 22 DIP 命中区) ---
+        gw = int(22 * s)
+        self.grip = tk.Canvas(self.shell, width=gw, height=gw, bg=C_BG,
+                              highlightthickness=0, cursor="size_nw_se")
+        self.grip.place(relx=1.0, rely=1.0, anchor="se", x=-1, y=-1)
+        self._paint_grip()
+        self.grip.bind("<Enter>", lambda e: self._paint_grip(True), add="+")
+        self.grip.bind("<Leave>", lambda e: self._paint_grip(False), add="+")
         self.grip.bind("<Button-1>", self._rs_press, add="+")
         self.grip.bind("<B1-Motion>", self._rs_move, add="+")
         self.grip.bind("<ButtonRelease-1>", lambda e: self.save_config(), add="+")
@@ -584,11 +636,11 @@ class App:
         s = self.s
         f = self.list_frame
         if ln.kind == "blank":
-            sp = tk.Frame(f, bg=C_BG, height=int(6 * s))
+            sp = tk.Frame(f, bg=C_BG, height=int(8 * s))
             sp.pack(fill="x")
             sp.bind("<Button-3>", self.menu_blank, add="+")
             return
-        pad = int(12 * s) + min(ln.indent_units() * int(7 * s), int(160 * s))
+        pad = int(16 * s) + min(ln.indent_units() * int(8 * s), int(160 * s))
         row = tk.Frame(f, bg=C_BG)
         row.pack(fill="x")
         row.bind("<Button-3>", self.menu_blank, add="+")   # 行内边距的空白也算空白处
@@ -597,9 +649,9 @@ class App:
         if ln.kind == "header":
             lbl = tk.Label(row, text=ln.text, bg=C_BG, fg=C_HEADFG, font=self.f_head,
                            anchor="w", justify="left")
-            lbl.pack(fill="x", padx=(pad, int(10 * s)), pady=(int(10 * s), int(2 * s)))
+            lbl.pack(fill="x", padx=(pad, int(10 * s)), pady=(int(8 * s), int(4 * s)))
             info["lbl"], info["pack"], info["font"] = lbl, \
-                {"fill": "x", "padx": (pad, int(10 * s)), "pady": (int(10 * s), int(2 * s))}, self.f_head
+                {"fill": "x", "padx": (pad, int(10 * s)), "pady": (int(8 * s), int(4 * s))}, self.f_head
             info["wrap_pad"] = pad
             lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
             lbl.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
@@ -607,7 +659,7 @@ class App:
             if ln.kind == "todo":
                 box = tk.Canvas(row, width=int(18 * s), height=int(18 * s),
                                 bg=C_BG, highlightthickness=0, cursor="hand2")
-                box.pack(side="left", padx=(pad, int(7 * s)), pady=int(4 * s))
+                box.pack(side="left", padx=(pad, int(8 * s)), pady=int(4 * s))
                 self.draw_box(box, ln.checked)
                 box.bind("<Button-1>", lambda e, i=i: self.toggle_line(i))
                 box.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
@@ -615,20 +667,13 @@ class App:
                 # 子树徽标「✓2/5 📝3」: 递归统计整棵子树, 点按打开详情面板
                 td, dn, nt = subtree_stats(self.lines, i)
                 if td or nt:
-                    parts = []
-                    if td:
-                        parts.append("✓%d/%d" % (dn, td))
-                    if nt:
-                        parts.append("📝%d" % nt)
-                    btxt = " ".join(parts)
-                    badge = tk.Label(row, text=btxt, bg=C_BG, fg=C_NOTE,
-                                     font=self.f_btn, cursor="hand2")
-                    badge.pack(side="right", padx=(0, int(10 * s)))
+                    badge = self._make_badge(row, td, dn, nt)
+                    badge.pack(side="right", padx=(0, int(12 * s)))
                     badge.bind("<Button-1>", lambda e, i=i: self.open_panel(i))
                     info["badge"] = badge
-                    # todo 行 wrap_pad=pad+勾选框(18s+7s), 再加实测徽标宽+右边距
-                    info["wrap_pad"] = pad + int(18 * s) + int(7 * s) \
-                        + self.f_btn.measure(btxt) + int(10 * s)
+                    # todo 行 wrap_pad=pad+勾选框(18s+8s), 再加实测徽标宽+右边距
+                    info["wrap_pad"] = pad + int(18 * s) + int(8 * s) \
+                        + badge.badge_width + int(12 * s)
             elif ln.kind == "note":
                 pad += int(16 * s)
             font = (self.f_item_done if ln.checked else self.f_item) \
@@ -644,7 +689,7 @@ class App:
             lbl = tk.Label(row, text=text_disp, bg=C_BG, fg=fg, font=font,
                            anchor="w", justify="left")
             info["wrap_pad"] = pad if ln.kind != "todo" \
-                else pad + int(18 * s) + int(7 * s)
+                else pad + int(18 * s) + int(8 * s)
             lbl.pack(side="left", fill="x", expand=True,
                      padx=(0 if ln.kind == "todo" else pad, int(12 * s)), pady=int(2 * s))
             info["lbl"] = lbl
@@ -658,6 +703,7 @@ class App:
             else:
                 lbl.bind("<Double-Button-1>", lambda e, i=i: self.edit_row(i))
             lbl.bind("<Button-3>", lambda e, i=i: self.menu_row(e, i))
+        self._bind_row_hover(row, (info.get("lbl"), info.get("box"), info.get("badge")))
         self.rows[i] = info
 
     def draw_box(self, canvas, checked):
@@ -671,7 +717,89 @@ class App:
             canvas.create_line(int(8 * s), int(12 * s), int(13 * s), int(5 * s),
                                fill="white", width=2, capstyle="round", joinstyle="round")
         else:
-            canvas.create_rectangle(a, a, b, b, outline=C_BOX, width=int(1 * s) + 1)
+            canvas.create_rectangle(a, a, b, b, outline=C_BOX, width=max(1, int(1 * s)))
+
+    def _paint_grip(self, hover=False):
+        c = self.grip
+        c.delete("all")
+        s = self.s
+        col = "#8B95A1" if hover else C_GRIP
+        width = max(1, int(1 * s))
+        size = int(14 * s)
+        for d in (int(2 * s), int(6 * s), int(10 * s)):
+            c.create_line(size - d, size, size, size - d,
+                          fill=col, width=width, capstyle="round")
+
+    def _bind_row_hover(self, row, widgets):
+        """行 hover/pressed: 同一行的 Frame/Label/Canvas 一起换底色。"""
+        ws = [row] + [w for w in widgets if w is not None]
+
+        def tint(color):
+            for w in ws:
+                try:
+                    w.configure(bg=color)
+                except tk.TclError:
+                    pass
+
+        for w in ws:
+            w.bind("<Enter>", lambda e: tint(C_HOVER), add="+")
+            w.bind("<Leave>", lambda e: tint(C_BG), add="+")
+            w.bind("<ButtonPress-1>", lambda e: tint(C_PRESS), add="+")
+            w.bind("<ButtonRelease-1>", lambda e: tint(C_HOVER), add="+")
+
+    def _make_badge(self, parent, td, dn, nt):
+        """子树徽标: 勾/页图标用线条画, 数字用正文字体, 不再依赖 emoji 回退字形。"""
+        s = self.s
+        f = self.f_btn
+        icon = int(10 * s)
+        gap = int(4 * s)
+        mid = int(8 * s)
+        t1 = ("%d/%d" % (dn, td)) if td else ""
+        t2 = ("%d" % nt) if nt else ""
+        w = 0
+        if t1:
+            w += icon + gap + f.measure(t1)
+        if t1 and t2:
+            w += mid
+        if t2:
+            w += icon + gap + f.measure(t2)
+        w = max(w, 1)
+        h = int(18 * s)
+        c = tk.Canvas(parent, width=w, height=h, bg=C_BG,
+                      highlightthickness=0, cursor="hand2")
+        y = h // 2
+        x = 0
+        if t1:
+            self._badge_check(c, x, y)
+            c.create_text(x + icon + gap, y, text=t1, anchor="w",
+                          font=f, fill=C_NOTE)
+            x += icon + gap + f.measure(t1)
+        if t1 and t2:
+            x += mid
+        if t2:
+            self._badge_note(c, x, y)
+            c.create_text(x + icon + gap, y, text=t2, anchor="w",
+                          font=f, fill=C_NOTE)
+        c.badge_width = w
+        return c
+
+    def _badge_check(self, c, x, y):
+        s = self.s
+        width = max(1, int(1 * s))
+        c.create_line(x + int(1 * s), y, x + int(4 * s), y + int(3 * s),
+                      x + int(9 * s), y - int(4 * s),
+                      fill=C_NOTE, width=width, capstyle="round", joinstyle="round")
+
+    def _badge_note(self, c, x, y):
+        s = self.s
+        width = max(1, int(1 * s))
+        c.create_rectangle(x + int(1 * s), y - int(6 * s),
+                           x + int(9 * s), y + int(6 * s),
+                           outline=C_NOTE, width=width)
+        c.create_line(x + int(3 * s), y - int(3 * s),
+                      x + int(7 * s), y - int(3 * s), fill=C_NOTE, width=width)
+        c.create_line(x + int(3 * s), y,
+                      x + int(7 * s), y, fill=C_NOTE, width=width)
 
     def _bind_wheel_tree(self, w, canvas):
         """把滚轮事件绑到 w 及其所有子件, 滚动指定画布(主列表/面板共用)。"""
@@ -960,7 +1088,9 @@ class App:
         self.panel_todo = i
         s = self.s
         win = self.panel = tk.Toplevel(self.root)
-        win.configure(bg=C_BG)
+        win.configure(bg=C_HAIRLINE)
+        shell = tk.Frame(win, bg=C_BG)
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
         # 无边框: 隐藏 Windows 原生标题栏(用户反馈其与自绘标题行重复),
         # 面板只保留下方自绘标题行; 位置由 panel_pos 决定, 无系统拖动需求。
         # overrideredirect 必须在映射前设置, 映射后再切会闪现原生边框。
@@ -991,30 +1121,36 @@ class App:
         self.log("panel open i=%d" % i)
 
         # 标题栏: 待办文字(双击改名) + 关闭
-        hdr = tk.Frame(win, bg=C_HEADER, height=int(34 * s))
+        hdr = tk.Frame(shell, bg=C_HEADER, height=int(34 * s))
         hdr.pack(fill="x", side="top")
         hdr.pack_propagate(False)
         self.p_title_pack = {"side": "left", "fill": "x", "expand": True,
-                             "padx": (int(10 * s), int(4 * s)), "pady": int(4 * s)}
+                             "padx": (int(12 * s), int(4 * s)), "pady": int(4 * s)}
         self.p_title_lbl = tk.Label(hdr, text=ln.text, bg=C_HEADER, fg=C_TEXT,
-                                    font=self.f_btn, anchor="w")
+                                    font=self.f_head, anchor="w")
         self.p_title_lbl.pack(**self.p_title_pack)
         self.p_title_lbl.bind("<Double-Button-1>", lambda e: self.p_rename())
         xb = tk.Label(hdr, text="✕", bg=C_HEADER, fg="#5A6472", font=self.f_btn,
                       padx=int(7 * s), cursor="hand2")
         xb.pack(side="right", padx=(0, int(6 * s)))
         xb.bind("<Button-1>", lambda e: self.close_panel())
+        xb.bind("<Enter>", lambda e: xb.configure(bg=C_BTN_HOVER), add="+")
+        xb.bind("<Leave>", lambda e: xb.configure(bg=C_HEADER), add="+")
+        xb.bind("<ButtonPress-1>", lambda e: xb.configure(bg=C_BTN_PRESS), add="+")
+        xb.bind("<ButtonRelease-1>", lambda e: xb.configure(bg=C_BTN_HOVER), add="+")
+        p_rule = tk.Frame(shell, bg=C_RULE, height=1)
+        p_rule.pack(fill="x", side="top")
 
         # 内容区: 上下两栏各占一半, 各自独立滚动
         # 上栏 = 子待办 + 左下角「添加子待办」; 下栏 = 备注 + 左下角「添加备注」
         # 用 grid + uniform 保证两栏严格 1:1(用 pack 时按各自请求高度分剩余空间, 内容多的那栏会更高)
-        body = tk.Frame(win, bg=C_BG)
+        body = tk.Frame(shell, bg=C_BG)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1, uniform="pane")
         body.rowconfigure(2, weight=1, uniform="pane")
         self.p_todo_canvas, self.p_todo_frame = self._p_make_pane(body, True, 0)
-        sep = tk.Frame(body, bg="#E3E7EC", height=1)
+        sep = tk.Frame(body, bg=C_RULE, height=1)
         sep.grid(row=1, column=0, sticky="ew")
         self.p_note_canvas, self.p_note_frame = self._p_make_pane(body, False, 2)
         for canvas, frame in ((self.p_todo_canvas, self.p_todo_frame),
@@ -1040,10 +1176,14 @@ class App:
         bar.pack(fill="x", side="bottom")
         add = tk.Label(bar, text="＋ 添加子待办" if is_todo else "＋ 添加备注",
                        bg=C_BG, fg=C_ACCENT, font=self.f_btn,
-                       cursor="hand2", padx=int(10 * s), pady=int(6 * s))
+                       cursor="hand2", padx=int(16 * s), pady=int(8 * s))
         add.pack(side="left")
         add.bind("<Button-1>", lambda e: (self.p_add_todo() if is_todo
                                           else self.p_add_note()))
+        add.bind("<Enter>", lambda e: add.configure(bg=C_HOVER), add="+")
+        add.bind("<Leave>", lambda e: add.configure(bg=C_BG), add="+")
+        add.bind("<ButtonPress-1>", lambda e: add.configure(bg=C_PRESS), add="+")
+        add.bind("<ButtonRelease-1>", lambda e: add.configure(bg=C_HOVER), add="+")
         canvas = tk.Canvas(pane, bg=C_BG, highlightthickness=0,
                            yscrollincrement=int(26 * s))
         canvas.pack(fill="both", expand=True)
@@ -1132,7 +1272,7 @@ class App:
         if ln.kind == "todo":
             box = tk.Canvas(row, width=int(18 * s), height=int(18 * s),
                             bg=C_BG, highlightthickness=0, cursor="hand2")
-            box.pack(side="left", padx=(pad, int(7 * s)), pady=int(4 * s))
+            box.pack(side="left", padx=(pad, int(8 * s)), pady=int(4 * s))
             self.draw_box(box, ln.checked)
             box.bind("<Button-1>", lambda e, j=j: self.toggle_line(j))
             box.bind("<Button-3>", lambda e, j=j: self.p_menu(e, j))
@@ -1148,7 +1288,7 @@ class App:
         text_disp = ("• " + ln.text) if ln.kind == "note" else ln.text
         lbl = tk.Label(row, text=text_disp, bg=C_BG, fg=fg, font=font,
                        anchor="w", justify="left")
-        info["wrap_pad"] = pad + (int(18 * s) + int(7 * s) if ln.kind == "todo" else 0)
+        info["wrap_pad"] = pad + (int(18 * s) + int(8 * s) if ln.kind == "todo" else 0)
         lbl.pack(side="left", fill="x", expand=True,
                  padx=(0 if ln.kind == "todo" else pad, int(12 * s)), pady=int(2 * s))
         info["lbl"] = lbl
@@ -1158,6 +1298,7 @@ class App:
                         "pady": int(2 * s)}
         lbl.bind("<Double-Button-1>", lambda e, j=j: self.p_edit(j))
         lbl.bind("<Button-3>", lambda e, j=j: self.p_menu(e, j))
+        self._bind_row_hover(row, (lbl, info.get("box")))
         self.p_rows[j] = info
         infos.append(info)
 
@@ -1224,7 +1365,7 @@ class App:
         if not 0 <= i < len(self.lines) or self.p_rename_entry is not None:
             return
         lbl = self.p_title_lbl
-        ent = tk.Entry(lbl.master, font=self.f_btn, **ENTRY_STYLE)
+        ent = tk.Entry(lbl.master, font=self.f_head, **ENTRY_STYLE)
         lbl.pack_forget()
         ent.pack(side="left", fill="x", expand=True,
                  padx=self.p_title_pack["padx"], pady=self.p_title_pack["pady"],
@@ -1388,6 +1529,7 @@ class App:
     def _update_pin(self):
         """钉住图标: 悬浮置顶时点亮(蓝字浅蓝底), 贴桌面时回到常态灰。"""
         lit = not self.docked
+        self.btn_pin.lit = lit
         try:
             self.btn_pin.config(bg="#DCE9FA" if lit else C_HEADER)
             self.btn_pin.itemconfigure(self.btn_pin.glyph,
@@ -1508,6 +1650,24 @@ class App:
             pass
 
 
+def _set_dpi_awareness():
+    """优先 PerMonitorV2, 失败退回 system-aware。
+
+    Tk 8.6 不处理 WM_DPICHANGED, 窗口跨不同缩放屏时像素尺寸不变; PMv2 至少让
+    新窗口按目标屏 DPI 渲染, 不再整窗位图拉伸(旧版 system-aware 的主要模糊源)。
+    """
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "pmv2"
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        return "system"
+    except Exception:
+        return "none"
+
+
 def main():
     if TEST_MODE:
         file_path = sys.argv[1]
@@ -1526,17 +1686,17 @@ def main():
 
     # 单实例保护
     k32 = ctypes.windll.kernel32
+    # 启动器/终端可能留下 183 的 last error, 先清零再建互斥体, 否则会误判已有实例
+    k32.SetLastError(0)
     k32.CreateMutexW(None, False, MUTEX_NAME)
     if ctypes.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         sys.exit(0)
 
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
+    awareness = _set_dpi_awareness()
 
     root = tk.Tk()
     app = App(root, file_path)
+    app.log("dpi awareness: %s" % awareness)
 
     s = app.s
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()  # 物理像素
