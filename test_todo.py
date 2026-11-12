@@ -148,6 +148,52 @@ class SubtreeStatsTest(unittest.TestCase):
         self.assertEqual(self.mod.subtree_stats(lines, 0), (2, 2, 1))
 
 
+class PanelPartsTest(unittest.TestCase):
+    """详情面板分栏 panel_parts: 子块拆成(上栏子待办, 下栏备注)两组下标。
+
+    两栏都按文件原顺序、递归收录(更深的子孙内容照常显示, 不自动改写文件);
+    空行两栏都不进; 普通段落行(other)当下栏的普通文字。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_todo()
+
+    def test_splits_in_file_order(self):
+        lines = self.mod.parse_text(
+            "- [ ] 父\n"
+            "  - [ ] 子1\n"
+            "  - 备注1\n"
+            "  - [x] 子2\n"
+            "  - 备注2\n")
+        self.assertEqual(self.mod.panel_parts(lines, 0), ([1, 3], [2, 4]))
+
+    def test_no_children(self):
+        lines = self.mod.parse_text("- [ ] 父\n- [ ] 下一个\n")
+        self.assertEqual(self.mod.panel_parts(lines, 0), ([], []))
+
+    def test_blank_lines_skipped(self):
+        lines = self.mod.parse_text("- [ ] 父\n  - [ ] 子\n\n  - 备注\n")
+        self.assertEqual(self.mod.panel_parts(lines, 0), ([1], [3]))
+
+    def test_other_line_goes_to_notes(self):
+        lines = self.mod.parse_text("- [ ] 父\n  普通段落\n  - 备注\n")
+        self.assertEqual(self.mod.panel_parts(lines, 0), ([], [1, 2]))
+
+    def test_deep_content_still_listed(self):
+        # 层级封顶后仍容忍文件里已有的更深内容: 照常进对应栏, 不丢行
+        lines = self.mod.parse_text(
+            "- [ ] 父\n"
+            "  - [ ] 子\n"
+            "    - [ ] 孙\n"
+            "      - 曾孙备注\n")
+        self.assertEqual(self.mod.panel_parts(lines, 0), ([1, 2], [3]))
+
+    def test_stops_at_next_sibling(self):
+        lines = self.mod.parse_text("- [ ] A\n- [ ] 父\n  - [ ] 子\n- [ ] B\n")
+        self.assertEqual(self.mod.panel_parts(lines, 1), ([2], []))
+
+
 class DeleteSubtreeTest(unittest.TestCase):
     """整树删除 delete_subtree: 移除待办及其子块，返回新列表不动原列表。"""
 
