@@ -21,3 +21,9 @@ roundtrip_check.py
 # ---- 打包构建产物 ----
 build/
 dist/
+
+# ---- Tauri 2 spike (2026-11) ----
+spike/tauri2/src-tauri/target/
+spike/tauri2/src-tauri/Cargo.lock.bak
+spike/wvprobe/target/
+spike/tauri2/src-tauri/gen/

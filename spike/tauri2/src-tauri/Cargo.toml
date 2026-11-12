@@ -1,0 +1,17 @@
+[package]
+name = "desktop-todo-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri 2 spike for desktop-todo option C"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# 打开即嵌入 frontendDist（生产形态）；不带它 cargo run 走 devUrl。
+custom-protocol = ["tauri/custom-protocol"]

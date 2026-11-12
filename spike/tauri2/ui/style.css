@@ -1,0 +1,124 @@
+/* spike/tauri2/ui/style.css — Phase 0 设计语言的延续 + Tk 做不到的部分 */
+:root {
+  --bg: #FAFBFC; --header: rgba(237, 240, 244, 0.72);
+  --text: #24292F; --done: #9CA3AF; --note-t: #57606A;
+  --headfg: #3D76B5; --accent: #4A8FE2; --box: #C6CCD4;
+  --hover: #F2F5F8; --press: #E8EEF6; --rule: #DFE4EA;
+  --hairline: #E1E6ED; --radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* body 是唯一滚动容器：粘性顶栏才有意义——行滚动时从顶栏下方模糊穿过 */
+html, body {
+  height: 100%;
+  background: var(--bg); color: var(--text);
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  font-size: 13px; user-select: none;
+}
+body { overflow-y: auto; overflow-x: hidden; }
+body::-webkit-scrollbar { width: 6px; }
+body::-webkit-scrollbar-thumb { background: #C4CAD2; border-radius: 3px; }
+body::-webkit-scrollbar-thumb:hover { background: #A8B0BC; }
+
+/* ---- 顶栏：半透明 + backdrop blur，列表从它下面模糊穿过（Tk 做不到） ---- */
+#hdr {
+  position: sticky; top: 0; z-index: 10;
+  height: 44px; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 8px;
+  background: var(--header);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border-bottom: 1px solid var(--rule);
+}
+#hdr-title { padding-left: 8px; font-weight: 600; }
+#hdr-title .tag { font-size: 10px; font-weight: 400; color: var(--headfg); opacity: .75; }
+#hdr-btns { display: flex; gap: 2px; }
+.hbtn {
+  width: 34px; height: 30px; border: none; border-radius: var(--radius);
+  background: transparent; color: #5A6472; font-size: 13px; cursor: default;
+  transition: background 120ms ease, color 120ms ease;
+}
+.hbtn:hover { background: #E3E8EF; }
+.hbtn:active { background: #D7DEE7; }
+
+/* ---- 列表：圆角行 + hover/pressed 平滑过渡（Tk 只能瞬时变色） ---- */
+/* 不再自带滚动：body 滚动，顶栏 sticky 生效；底部留出状态栏高度 */
+#list { padding: 8px 8px 40px; scroll-behavior: smooth; }
+
+.row {
+  display: flex; align-items: center; min-height: 36px;
+  border-radius: var(--radius); padding: 2px 8px 2px 12px;
+  transition: background 120ms ease, transform 80ms ease;
+}
+.row:hover { background: var(--hover); }
+.row.pressing { background: var(--press); }
+.group-head {
+  color: var(--headfg); font-size: 15px; font-weight: 700;
+  padding: 14px 12px 6px; user-select: none;
+}
+.todo-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-row { color: var(--note-t); font-size: 12px; min-height: 30px; }
+.note-row .todo-text { color: var(--note-t); }
+.is-done .todo-text { color: var(--done); text-decoration: line-through; }
+
+/* 勾选框：AA 圆角方框 + 打勾缩放动画（Tk 方框只能是直角折线） */
+.checkbox {
+  flex: none; width: 18px; height: 18px; margin-right: 10px;
+  border: 2px solid var(--box); border-radius: 5px;
+  display: grid; place-items: center;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.checkbox svg { width: 11px; height: 11px; opacity: 0; transform: scale(.4); transition: opacity 140ms ease, transform 180ms cubic-bezier(.2, 1.6, .4, 1); }
+.checkbox.checked { border-color: var(--accent); background: var(--accent); }
+.checkbox.checked svg { opacity: 1; transform: scale(1); }
+
+/* 徽标：矢量图标 + 数字（0.2.7 去嵌入职的延续，这里是 SVG） */
+.badge { flex: none; display: flex; align-items: center; gap: 8px; color: #8B929B; font-size: 12px; margin-left: 8px; }
+.badge .b { display: inline-flex; align-items: center; gap: 3px; }
+.badge svg { width: 12px; height: 12px; }
+
+/* 行内编辑（IME 测试面） */
+.edit-input {
+  flex: 1; font: inherit; color: var(--text);
+  background: #fff; border: 1px solid var(--accent); border-radius: 6px;
+  outline: none; padding: 3px 6px;
+}
+
+/* ---- 状态栏（body 滚动时用 fixed 钉在视口底部） ---- */
+#statusbar {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 28px;
+  display: flex; align-items: center; gap: 12px; padding: 0 12px;
+  font-size: 11px; color: #6B7480; background: #F3F5F7;
+  border-top: 1px solid var(--rule);
+}
+#ime-state { color: var(--headfg); }
+
+/* ---- Tk 做不到的演示卡片 ---- */
+#demo-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center;
+  background: rgba(36, 41, 47, 0.18);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 1; transition: opacity 200ms ease;
+}
+#demo-overlay.hidden { opacity: 0; pointer-events: none; }
+#demo-card {
+  width: 300px; padding: 24px;
+  background: #fff; border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  transform: scale(1); transition: transform 220ms cubic-bezier(.2, 1.4, .4, 1);
+}
+#demo-overlay.hidden #demo-card { transform: scale(.92); }
+#demo-card h2 { font-size: 15px; margin-bottom: 12px; color: var(--text); }
+#demo-card ul { list-style: none; }
+#demo-card li { font-size: 12px; color: var(--note-t); padding: 5px 0 5px 16px; position: relative; }
+#demo-card li::before { content: ""; position: absolute; left: 0; top: 11px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+#btn-demo-close {
+  margin-top: 16px; width: 100%; height: 34px;
+  border: none; border-radius: var(--radius);
+  background: var(--accent); color: #fff; font-size: 13px; cursor: default;
+  transition: filter 120ms ease;
+}
+#btn-demo-close:hover { filter: brightness(1.06); }
+#btn-demo-close:active { filter: brightness(.94); }
