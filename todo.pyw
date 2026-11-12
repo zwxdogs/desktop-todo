@@ -28,7 +28,7 @@ import tkinter as tk
 from tkinter import font as tkfont, filedialog, messagebox
 
 APP_NAME = "桌面待办"
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 MUTEX_NAME = "Zwx_DesktopTodoWidget_Mutex"
 TEST_MODE = len(sys.argv) > 1  # 传入文件路径 = 测试运行
 
@@ -54,6 +54,7 @@ C_HEADER = "#EDF0F4"
 C_TEXT   = "#24292F"
 C_DONE   = "#9CA3AF"
 C_NOTE   = "#8B929B"
+C_NOTE_T = "#57606A"   # 备注正文: 备注移进详情面板后不必再用次要灰
 C_HEADFG = "#3D76B5"
 C_ACCENT = "#4A8FE2"
 C_BOX    = "#B6BDC6"
@@ -390,16 +391,33 @@ class App:
                                   font=self.f_btn, cursor="fleur")
         self.lbl_title.pack(side="left", padx=(int(10 * s), 0))
 
-        def hbtn(text, cmd):
-            b = tk.Label(hdr, text=text, bg=C_HEADER, fg="#5A6472", font=self.f_btn,
-                         padx=int(7 * s), cursor="hand2")
-            b.bind("<Button-1>", lambda e: cmd())
-            return b
+        # 图标按钮: 统一尺寸的 Canvas 盒子, 字形按墨迹包围盒居中。
+        # 不同字形的行盒高低不一, 用 Label 排版时视觉中心对不齐; 这里按
+        # bbox 反算偏移, 既让四个图标的中线一致, 点亮时的色块也正好套住字形。
+        bw, bh = int(30 * s), int(26 * s)
+        self._hdr_fonts = {}                    # 保住 Font 引用, 否则字形不显示
 
-        self.btn_close = hbtn("✕", self.on_close)
-        self.btn_refresh = hbtn("↻", self.refresh_from_disk)
-        self.btn_pin = hbtn("📌", self.toggle_dock)
-        self.btn_add = hbtn("＋", self.add_todo_end)
+        def hbtn(text, cmd, fsize):
+            box = tk.Canvas(hdr, width=bw, height=bh, bg=C_HEADER,
+                            highlightthickness=0, cursor="hand2")
+            fnt = self._hdr_fonts.get(fsize)
+            if fnt is None:
+                fnt = self._hdr_fonts[fsize] = tkfont.Font(
+                    family="Microsoft YaHei UI", size=fsize)
+            tid = box.create_text(bw // 2, bh // 2, text=text, font=fnt,
+                                  fill="#5A6472")
+            bb = box.bbox(tid)
+            if bb:                                  # 墨迹中心对齐盒子中心
+                box.move(tid, bw // 2 - (bb[0] + bb[2]) / 2.0,
+                         bh // 2 - (bb[1] + bb[3]) / 2.0 - 1)
+            box.glyph = tid
+            box.bind("<Button-1>", lambda e: cmd())
+            return box
+
+        self.btn_close = hbtn("✕", self.on_close, 12)
+        self.btn_refresh = hbtn("↻", self.refresh_from_disk, 13)
+        self.btn_pin = hbtn("📌", self.toggle_dock, 9)
+        self.btn_add = hbtn("＋", self.add_todo_end, 14)
         self.btn_close.pack(side="right", padx=(0, int(6 * s)))
         self.btn_refresh.pack(side="right")
         self.btn_pin.pack(side="right")
@@ -617,7 +635,7 @@ class App:
                 if ln.kind == "todo" else \
                 (self.f_note_done if ln.checked else self.f_note)
             fg = (C_DONE if ln.checked else C_TEXT) if ln.kind == "todo" else \
-                 (C_DONE if ln.checked else C_NOTE)
+                 (C_DONE if ln.checked else C_NOTE_T)
             if ln.kind == "other":
                 fg = C_TEXT
                 font = self.f_item
@@ -1123,7 +1141,7 @@ class App:
             if ln.kind == "todo" else \
             (self.f_note_done if ln.checked else self.f_note)
         fg = (C_DONE if ln.checked else C_TEXT) if ln.kind == "todo" else \
-             (C_DONE if ln.checked else C_NOTE)
+             (C_DONE if ln.checked else C_NOTE_T)
         if ln.kind == "other":
             fg = C_TEXT
             font = self.f_item
@@ -1308,9 +1326,6 @@ class App:
         m.add_command(label="在末尾添加分组",
                       command=lambda: self.insert_group(len(self.lines) - 1))
         m.add_separator()
-        m.add_command(label="更换文件…", command=self.choose_file)
-        m.add_command(label="打开文件位置", command=self.open_file_location)
-        m.add_separator()
         m.add_command(label="退出", command=self.on_close)
         try:
             m.tk_popup(event.x_root, event.y_root)
@@ -1374,8 +1389,9 @@ class App:
         """钉住图标: 悬浮置顶时点亮(蓝字浅蓝底), 贴桌面时回到常态灰。"""
         lit = not self.docked
         try:
-            self.btn_pin.config(fg=C_ACCENT if lit else "#5A6472",
-                                bg="#DCE9FA" if lit else C_HEADER)
+            self.btn_pin.config(bg="#DCE9FA" if lit else C_HEADER)
+            self.btn_pin.itemconfigure(self.btn_pin.glyph,
+                                       fill=C_ACCENT if lit else "#5A6472")
         except tk.TclError:
             pass
 
