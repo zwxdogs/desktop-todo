@@ -1,9 +1,8 @@
-# PARITY — Tauri 0.4.0 vs Tk 0.2.7 行为对照
+# PARITY — Tauri 实现与 Tk 0.2.7 的历史对照（迁移期工程记录）
 
-> 用户约束（m01392）：功能与 0.2.7 **完全一致，不增不减**。
-> 本表逐函数对照 `todo.pyw`（1754 行，0.2.7）与 `app/`（Tauri 2）。
-> 「等效」= 实现载体不同但用户可见行为一致；已知的载体差异在 §3 单列。
-> 0.4.0 的唯一功能增量是拖动排序（§3-6，Tk 0.2.7 没有），其余仍按等效对照。
+> **角色（[ADR 0005](../docs/adr/0005-lift-tk-parity.md)，2026-11-13）**：Tauri 2 实现是基线，Tk 0.2.7 是**历史参照**（`todo.pyw` 冻结在仓库里，只作回退路径与考古）。
+> 本表是 0.3.0 迁移期的逐函数工程记录，用来证明换栈时没漏功能；**它不再是约束**——新改动只要行为写清、测试守住、偏离记进 §3，不需要在这里补一行对照才被批准。
+> 「等效」= 迁移当时的用户可见行为一致；之后有意改动的条目在「状态」列注明，并按 §3 追加一条偏离记录。
 
 ## 1. 数据层（纯函数）
 
@@ -32,7 +31,7 @@
 | build_row(635) | app.js buildRow + style.css（pad=16+min(8u,160)；hover/整行） | 等效 |
 | draw_box(709) | app.js boxSvg（勾/白折线/2px 边） | 等效 |
 | badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移 20px 给拖动把手让位 |
-| 顶栏 hbtn(398-478) | index.html .hbtn ×4 + CSS hover/press/lit | 等效 |
+| 顶栏 hbtn(398-478) | index.html .hbtn ×4 + CSS hover/press/lit | 等效；0.4.0 起另有 2 个 SVG 图标按钮（更换文件 / 打开文件位置，§3-10） |
 | grip(495) | index.html #grip SVG 3 斜线 + hover 变色 | 等效 |
 | edit_row(835) | app.js editRow（Entry→input；不 trim、空照写；Esc/Enter/blur 同语义） | 等效 |
 | toggle_line(827) | app.js（box click → toggle → render → save） | 等效 |
@@ -43,7 +42,7 @@
 | push_undo/undo(1000-1023) | undo.js + app.js undo（编辑中忽略；栈顶同跳过；cap 50） | 等效 |
 | schedule_save/do_save(1026-1038) | app.js scheduleSave/doSave（250ms 防抖；失败标题「保存失败!」） | 等效 |
 | menu_row(1041) | app.js menuRow（header/todo/note/other 四组菜单项逐项一致） | 等效* |
-| menu_blank/menu_title(1463-1486) | app.js menuBlank/menuTitle | 等效* |
+| menu_blank/menu_title(1463-1486) | app.js menuBlank；menuTitle **已删除** | menu_blank 等效*；menu_title 取消（0.4.0，改为顶栏常驻图标，§3-10） |
 | _panel_locate(1075) | app.js locateAnchor（text+indent_units 锚） | 等效 |
 | open/close_panel(1083/1194) | app.js openPanel/closePanel + Rust panel_open/close（420s×520s、toolwindow、topmost、单实例） | 等效 |
 | render_panel(1225) | app.js pushPanelData → panel.js render（两栏、保滚动、标题同步） | 等效（跨窗事件） |
@@ -68,7 +67,7 @@
 
 ## 3. 有意的载体差异（行为一致或已获批）
 
-1. **菜单**：Tk 原生 `tk_popup` → 自绘 HTML 菜单（白底圆角阴影）。菜单项、顺序、sep、点击语义逐项一致；视觉是 0.2.7 视觉语言的自然延伸（同 Phase 0 批准的设计方向）。
+1. **菜单**：Tk 原生 `tk_popup` → 自绘 HTML 菜单（白底圆角阴影）。菜单项、顺序、sep、点击语义逐项一致；视觉是 0.2.7 视觉语言的自然延伸（同 Phase 0 批准的设计方向）。标题栏那一份已于 0.4.0 取消（§3-10），现在只剩列表空白 / 行 / 面板三处。
 2. **主窗口两态（ADR 0004，0.4.0）**：Tk 0.2.7 的 📌 是「贴桌面 / 悬浮置顶」，且贴桌面时任务栏没有入口。用户 2026-11-13 定稿改为「固定在桌面 / 普通窗口」：固定在桌面 = 桌面图标之上、所有应用窗口之下，任务栏与 Alt+Tab 里都没有它（`WS_EX_TOOLWINDOW` + `ITaskbarList::DeleteTab`）；普通窗口 = 正常 z 序、任务栏有图标、Alt+Tab 里有它，点任务栏图标就能加待办；默认普通窗口。置顶功能整体下线（两种模式都不 topmost），新增常驻托盘（左键唤回普通窗口，右键菜单切模式/退出），面板仍不进任务栏且保持 topmost。
 3. **拖动/缩放手势**：Tk 手动 geometry → 系统原生拖动/resize。手感更好；位置尺寸记账经 Moved/Resized → dirty_config → ≤1s 内落盘（Tk 是 release 时写）。
 4. **跨窗面板通信**：Tk 直接调 self 方法 → main↔panel 事件。面板编辑提交瞬间有一次旧值→新值的重渲染（Tk 是同步刷新），≤1 帧。
@@ -77,6 +76,8 @@
 7. **主窗口不渲染备注（0.4.0）**：备注只在详情面板出现；顶格备注行静默隐藏，文件字节保真、不迁移、不可编辑（用户 m00066/m00070 选定的甲案）。非待办/非备注的其它行（分不清类型的纯文本行）仍按 0.3.0 原样渲染，不隐藏。
 8. **跨窗口拖拽没做（载体限制）**：主窗口↔面板之间不能拖。WebView2 上 HTML5 DnD 跨窗口会被 wry 的 IDropTarget 吃掉（非文件载荷回 DROPEFFECT_NONE，tauri#15138 not planned），pointer 拖拽又跨不了窗口；0.4.0 只做各窗口内的排序。
 9. **测试模式不写 config.json（ADR 0004 期间新增）**：`DesktopTodo.exe <file> <dock|float>` 本来就从不读 config.json，但以前退出时照样把测试文件与测试窗口尺寸写进 exe 同目录的 config.json——跑一次探针就会把用户真实部署的配置改掉（2026-11-13 实测踩到，部署实例一度指向临时测试文件）。现在 testing 分支下 `write_config` 直接返回并记一行 `test mode: config.json not written`。
+10. **标题栏右键菜单取消，改顶栏常驻图标（0.4.0，[#3](https://github.com/zwxdogs/desktop-todo/issues/3)）**：原「右键标题栏 → 更换文件… / 打开文件位置 / 退出」整块删除，前两项改为顶栏两个常驻图标（内联单色 SVG，13px，热区 30×26，tooltip 走 `title`），中间 1px 分组竖线（`pointer-events: none`，穿透后等同点标题栏空白可拖窗）；右键标题栏现在什么也不发生。原因不是审美：Tauri 注入的 `window/scripts/drag.js` 在 document **冒泡**期注册 mousedown，命中 `data-tauri-drag-region` 时 `preventDefault + stopImmediatePropagation + start_dragging`，页面脚本冒泡期注册的"点菜单外面关掉"永远收不到——"菜单弹出后点标题栏关不掉"在该载体下修不好；常驻图标没有开合状态，直接绕开整类问题。退出只剩顶栏 ✕ 与列表空白右键菜单里的「退出」。顺带：最小内宽 260 → 300（顶栏多了两个按钮，260 会把标题挤没），并删掉 `tauri.conf.json` 里主窗口 `create: false` 下不生效的 `minWidth/minHeight`；标题截断时悬停由 `title` 属性给出完整文件名。
+11. **点标题栏提交内联编辑（0.4.0，[#4](https://github.com/zwxdogs/desktop-todo/issues/4)）**：用户可见行为与 Tk 一致（`todo.pyw:912-925` 就是提交），差别在实现——`app.js` 的"点编辑框外面提交"与"点菜单外关闭"、`panel.js` 的同款关菜单三条 document mousedown 改到**捕获阶段**。捕获先于注入脚本的冒泡监听，不再被 `preventDefault` 连带打断 input 的 blur（原来两者都会让编辑停在未提交状态）。
 
 ## 4. 验证状态
 
@@ -90,3 +91,5 @@
 - [x] ADR 0004 两态 + 托盘（2026-11-13，`app\build.ps1` + `cargo test --offline` + 5 个 `node app/ui/*.test.js` 共 83/83）：Rust `dock_style` 3 项单测通过；实机探针复核——固定在桌面时主窗口 `ex=0x190`（TOOLWINDOW=True、APPWINDOW=False，无 topmost）且 z 序贴近桌面层（1115 条链里第 1108 位，在所有应用窗口之下）；普通窗口 `ex=0x40110`（APPWINDOW=True、TOOLWINDOW=False）且 z 序在前；托盘 `tray_icon_app` 两模式均在。踩到的坑写进代码注释：首次 `ShowWindow` 会按建窗时样式重算 exstyle，显示前设的 TOOLWINDOW 会被抹掉，必须显示后再落一次（面板 `panel_open` 同理）
 - [x] ADR 0004 运行时切换实测（2026-11-13）：TEST_MODE 里点 📌 双向切换——固定→普通 `ex=0x190→0x40110`、日志 `normal: plain window (taskbar icon on)`；普通→固定 `ex=0x40110→0x190`、z 序 1112/1117、日志 `docked: pinned above desktop (no taskbar)`；两次切换窗口都保持可见（hide/show 无残留、无崩溃）。任务栏 UIA 核对：普通窗口态出现 `桌面待办 - 1 个运行窗口`，固定桌面态该条目消失。命令：`app\build.ps1`、`cargo test --offline`（3 项）、5 个 `node app/ui/*.test.js`（83/83）。托盘路径同样实测：左键点托盘图标 → 普通窗口（`ex=0x190→0x40110`，任务栏出现「桌面待办 - 1 个运行窗口」）；右键菜单选「固定在桌面」→ 回到 `ex=0x190` 且任务栏条目消失
 - [x] ADR 0004 code-review（Standards + Spec 两轴，2026-11-13）：硬违规已修（本文件验证条目补上命令）。判据项已修：「`DockStyle.appwindow` 与 `toolwindow` 互为反值」→ 合并进 `set_ex_flags` 内部互斥维护；「hwnd 取值重复 6 处」→ 抽 `win_hwnd`；「托盘 id 是裸字符串」→ 提为 `TRAY_SHOW`/`TRAY_DOCK`/`TRAY_QUIT`；「切换模式仍由前端算终态」→ 前端只上报目标态，真相源是 Rust 的 `Shared.docked`；「`save_config` 双写」→ 删前端那次；「`sync_tray_check` 并发乱序」→ 改单线程通道只落最新值；「ADR 说取内嵌图标却留纯色 fallback」→ 删 fallback；`updatePin` → `updateDockButton`。不采纳：给 ADR 新增 frontmatter 关系字段（0003 顶部已有取代注记）、为三处 `thread::spawn` 抽薄包装
+- [x] 0.4.0 顶栏图标 + 点标题栏提交编辑（2026-11-13，[#3](https://github.com/zwxdogs/desktop-todo/issues/3) / [#4](https://github.com/zwxdogs/desktop-todo/issues/4)）：`node --test --test-isolation=none app/ui/*.test.js` 83/83、`node --check` 两文件、`cargo check` 通过，`app\build.ps1` release 构建后部署重启；DOM 事件顺序没有可测接缝（现有测试全是纯函数），验收靠实机手测——编辑中点标题栏空白/文字提交并落盘、右键标题栏无菜单、分组竖线可拖窗、最窄 300 时标题省略、双击最大化与拖动排序不回归
+- [x] ADR 0005 解除对等约束（2026-11-13）：本文件顶部改写角色、§3 补 #3/#4 两条偏离、§2 的 menu_title 与顶栏按钮行同步；0003 / 0004 / AGENTS.md 互相引用，仓库内不再有"必须与 0.2.7 完全一致"的表述

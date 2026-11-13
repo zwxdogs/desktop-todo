@@ -12,6 +12,10 @@ Five canonical triage roles; each label string equals its role name. See `docs/a
 
 Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Baseline
+
+The Tauri 2 implementation (`app/`) is the baseline. Tk 0.2.7 (`todo.pyw` + the root `build.ps1`) is frozen: a fallback build path and a historical reference only — see `app/PARITY.md` and `docs/adr/0005-lift-tk-parity.md`. Behaviour parity with 0.2.7 is **not** a constraint; record any intentional deviation in `app/PARITY.md` §3.
+
 ### Branching and release
 
 `dev` is the integration branch: all features, fixes, and refactors land there first. `main` carries released code only.
