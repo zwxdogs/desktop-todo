@@ -1,8 +1,9 @@
-# PARITY — Tauri 0.3.0 vs Tk 0.2.7 行为对照
+# PARITY — Tauri 0.4.0 vs Tk 0.2.7 行为对照
 
 > 用户约束（m01392）：功能与 0.2.7 **完全一致，不增不减**。
 > 本表逐函数对照 `todo.pyw`（1754 行，0.2.7）与 `app/`（Tauri 2）。
 > 「等效」= 实现载体不同但用户可见行为一致；已知的载体差异在 §3 单列。
+> 0.4.0 的唯一功能增量是拖动排序（§3-6，Tk 0.2.7 没有），其余仍按等效对照。
 
 ## 1. 数据层（纯函数）
 
@@ -15,8 +16,9 @@
 | subtree_end (160-186) | subtreeEnd | 等效 |
 | subtree_stats/panel_parts (189-227) | subtreeStats/panelParts | 等效 |
 | delete_subtree (236-254) | deleteSubtree | 等效 |
+| —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
 
-测试：`node --test app/ui/*.test.js` = **57/57**（md + undo，与 test_todo.py 36 用例同源扩展）。
+测试：`node --test app/ui/*.test.js` = **83/83**（md + undo，与 test_todo.py 36 用例同源扩展）。
 
 ## 2. 应用层逐函数对照
 
@@ -26,10 +28,10 @@
 | load_file(565) | app.js loadFile（missing→showMissing；undo 栈重置；标题 basename 去 .md） | 等效 |
 | refresh_from_disk(581) | app.js refreshFromDisk（commit→取消 save→存在则先写→load） | 等效 |
 | show_missing(591) | app.js showMissing（同文案/wraplength 300） | 等效 |
-| render_list(605) | app.js renderList（滚动分数保存恢复） | 等效 |
+| render_list(605) | app.js renderList（滚动分数保存恢复；0.4.0 起主窗口跳过备注行） | 等效 |
 | build_row(635) | app.js buildRow + style.css（pad=16+min(8u,160)；hover/整行） | 等效 |
 | draw_box(709) | app.js boxSvg（勾/白折线/2px 边） | 等效 |
-| badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效 |
+| badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移 20px 给拖动把手让位 |
 | 顶栏 hbtn(398-478) | index.html .hbtn ×4 + CSS hover/press/lit | 等效 |
 | grip(495) | index.html #grip SVG 3 斜线 + hover 变色 | 等效 |
 | edit_row(835) | app.js editRow（Entry→input；不 trim、空照写；Esc/Enter/blur 同语义） | 等效 |
@@ -71,11 +73,16 @@
 3. **拖动/缩放手势**：Tk 手动 geometry → 系统原生拖动/resize。手感更好；位置尺寸记账经 Moved/Resized → dirty_config → ≤1s 内落盘（Tk 是 release 时写）。
 4. **跨窗面板通信**：Tk 直接调 self 方法 → main↔panel 事件。面板编辑提交瞬间有一次旧值→新值的重渲染（Tk 是同步刷新），≤1 帧。
 5. **测试日志**：testing 模式写 `widget.log`（saved/loaded/panel/undo 等状态迁移，与 Tk 0.2.7 的 widget.log 同层级）；生产模式不写日志文件。调试期探针（click trace、按钮 client 坐标、toggle 栈、client_to_screen）已全部删除。
+6. **拖动排序（0.4.0 新增，Tk 0.2.7 没有）**：主窗口里分组标题与顶层待办可拖（行右缘把手，悬停现身），整块搬：待办带走子树、分组带走整组，缩进原样；面板两栏各自排序（子待办/备注互不越栏，指针移出本栏即无落点）。落点只有整块边界（行间插入线 #4A8FE2，从缩进位画到行右缘），每次落点一条撤销记录，落回原处不写文件。两条边界规则写在 md.canMove 里：「第一个分组标题之前永远不设落点」「分组只落在另一组的标题之前或文件末尾」（否则会静默并组）；指针停进上下 24px 连续自动滚动。
+7. **主窗口不渲染备注（0.4.0）**：备注只在详情面板出现；顶格备注行静默隐藏，文件字节保真、不迁移、不可编辑（用户 m00066/m00070 选定的甲案）。非待办/非备注的其它行（分不清类型的纯文本行）仍按 0.3.0 原样渲染，不隐藏。
+8. **跨窗口拖拽没做（载体限制）**：主窗口↔面板之间不能拖。WebView2 上 HTML5 DnD 跨窗口会被 wry 的 IDropTarget 吃掉（非文件载荷回 DROPEFFECT_NONE，tauri#15138 not planned），pointer 拖拽又跨不了窗口；0.4.0 只做各窗口内的排序。
 
 ## 4. 验证状态
 
-- [x] 纯函数 TDD 57/57（`node --test app/ui/*.test.js`，2026-11-13）
+- [x] 纯函数 TDD 78/78（`node --test app/ui/*.test.js`，2026-11-13）
 - [x] Rust release 编译通过（`app\build.ps1`，产物 `dist\DesktopTodo\DesktopTodo.exe`，2026-11-13）
 - [x] TEST_MODE 运行时 parity：勾选/行内编辑/删除/Ctrl+Z/面板开合与内容/改名/删除、两次启动无漂移、Win+D 自愈、拖动与 grip 落盘（2026-11-13，票 #1）
 - [x] 人工视觉对比（0.2.7 vs 0.3.0 截图；行距 26px、勾选框/文字/徽标同中线，用户确认）
+- [x] 0.4.0 拖动排序：md.js 纯函数 26 项 TDD + DOM 侧主窗口/面板接入（2026-11-13）
+- [x] 0.4.0 code-review（Standards + Spec 两轴，2026-11-13）：已修「分组拖进别人组中间会静默并组」「开头有杂物时仍能落到第一组之前」「拖到一半文件被外部改过仍按旧下标落点」「面板不认跨栏」「边缘滚动只在动鼠标时生效」「插入线右端/徽标让位未写进 PARITY」；两窗重复的拖动引擎记录为后续可抽 app/ui/dnd.js，不阻塞本次交付
 - [x] code-review（Standards + Spec 两轴，2026-11-13）：4 条硬违规已修（fixture 移入 app/ui/fixtures/、测试命令路径统一、md.js 头注释、删除无调用者的 show_message）；重复菜单/commit 四连/Rust hwnd 锁辅助等判据项记录为后续重构，不阻塞本次交付

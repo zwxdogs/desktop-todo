@@ -1,7 +1,8 @@
-/* 桌面待办 0.3.0 —— 0.2.7 视觉规格的 CSS 移植。
+/* 桌面待办 0.4.0 —— 0.2.7 视觉规格的 CSS 移植。
    尺寸一律用裸 px（CSS 逻辑像素）：WebView2 随系统 DPI 自动放大，
    1 CSS px @200% = 2 物理像素，与 Tk 的 N*s 物理像素逐位等价（spike 已实证）。
-   颜色常量与 todo.pyw 52-67 行一一对应。 */
+   颜色常量与 todo.pyw 52-67 行一一对应。
+   0.4.0 追加：拖动把手 / 浮层 / 插入线（Tk 0.2.7 无此功能）。 */
 
 * { box-sizing: border-box; }
 
@@ -84,6 +85,7 @@ body::-webkit-scrollbar { display: none; }
 .gap { height: 8px; }      /* Tk blank 行 */
 
 .row {
+  position: relative;   /* 0.4.0：拖动把手绝对定位在行右缘 */
   display: flex;
   align-items: flex-start;
   padding: 2px 0;   /* 行距收紧；首行 22px 行高与勾选框/徽标共用一条中线 */
@@ -170,6 +172,81 @@ body::-webkit-scrollbar { display: none; }
 .badge .badge-check { height: 10px; }
 .badge .badge-note { height: 12px; }
 .badge .mid { width: 8px; }
+
+/* ---------- 拖动排序（0.4.0） ---------- */
+/* 行右缘绝对定位的把手：只在悬停行上现身，不参与文字排版 */
+.drag-handle {
+  position: absolute;
+  top: 3px;
+  right: 2px;
+  width: 18px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #B4BCC6;
+  opacity: 0;
+  transition: opacity .12s;
+  cursor: grab;
+}
+.drag-handle svg { width: 8px; height: 14px; display: block; }
+.drag-handle:hover { color: #6B7480; }
+.drag-handle:active { cursor: grabbing; }
+.row:hover .drag-handle { opacity: 1; }
+.row-header .drag-handle { top: 7px; right: 8px; }
+
+/* 悬停让位：徽标左移 20px（transform 不重排文字），把手正好落在让出的位置 */
+.badge { transition: transform .12s; }
+.row:hover .badge { transform: translateX(-20px); }
+
+/* 拖起：原位留一块虚线占位（不重排） */
+.row.drag-src {
+  opacity: .35;
+  outline: 1px dashed #AFC0D6;
+  outline-offset: -1px;
+  border-radius: 4px;
+  background: #F2F6FB;
+}
+
+/* 跟随指针的浮层：只显示文字 + 子项计数 */
+.drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, .94);
+  border: 1px solid #C9D6E8;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, .16);
+  color: #24292F;
+  font-size: 10pt;
+  line-height: 18px;
+  pointer-events: none;
+}
+.drag-ghost-header { color: #3D76B5; font-weight: bold; font-size: 11pt; }
+.drag-ghost-text {
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.drag-ghost-count { flex-shrink: 0; color: #5B91CF; font-size: 9pt; }
+
+/* 插入线：从目标缩进位画到行右缘 */
+.drop-line {
+  position: fixed;
+  z-index: 190;
+  height: 2px;
+  background: #4A8FE2;
+  border-radius: 1px;
+  pointer-events: none;
+}
+body.dragging { cursor: grabbing; }
+body.dragging .row:hover .badge { transform: none; }
 
 /* ---------- 右下角缩放把手（3 条斜线，22 命中区） ---------- */
 #grip {

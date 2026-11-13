@@ -1,8 +1,9 @@
-/* 桌面待办 0.3.0 详情面板逻辑（panel.html）。
+/* 桌面待办 0.4.0 详情面板逻辑（panel.html）。
    与 todo.pyw (0.2.7) 的 p_* 系列函数对应：
    - 数据由主窗口经 panel-data 推送（Tk render_panel 的远端等价物）
    - 操作经 panel-req 回传主窗口应用（Tk 直接改 self.lines 的远端等价物）
-   - 行内编辑/标题改名在本地进行，提交时回传（Tk p_edit/p_rename 的 commit/cancel） */
+   - 行内编辑/标题改名在本地进行，提交时回传（Tk p_edit/p_rename 的 commit/cancel）
+   0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。 */
 'use strict';
 
 /* __TAURI__ 由注入脚本在页面加载后写入，panel.js 可能先于它执行（与 app.js 早期同类竞态）。
@@ -63,6 +64,7 @@ function pMenu(j, x, y) {
 function buildRow(container, item, isTodo) {
   const row = document.createElement('div');
   row.className = `row row-${item.kind}`;
+  row.dataset.j = String(item.j);
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -89,13 +91,230 @@ function buildRow(container, item, isTodo) {
   }
   lbl.addEventListener('dblclick', () => pEdit(item.j));
   row.appendChild(lbl);
+  addHandle(row, item.j, container);   // 0.4.0：拖动手柄
   container.appendChild(row);
   return lbl;
+}
+
+/* ---------- 拖动排序（0.4.0）----------
+   两栏各自排序：子待办只与子待办换位，备注只与备注换位（跨栏不合法）。
+   本地只画浮层与插入线，落定后把「从哪行搬到哪行之前/之后」回传主窗口，
+   由拥有 S.lines 的主窗口用 md.moveBlock 真正搬行。 */
+
+const GRIP_SVG = '<svg viewBox="0 0 8 14" fill="none">'
+  + '<circle cx="2" cy="3" r="1.1" fill="currentColor"/><circle cx="6" cy="3" r="1.1" fill="currentColor"/>'
+  + '<circle cx="2" cy="7" r="1.1" fill="currentColor"/><circle cx="6" cy="7" r="1.1" fill="currentColor"/>'
+  + '<circle cx="2" cy="11" r="1.1" fill="currentColor"/><circle cx="6" cy="11" r="1.1" fill="currentColor"/>'
+  + '</svg>';
+
+const EDGE_SCROLL = 24;  // 指针进到本栏上下这么多像素内就开始自动滚动
+const EDGE_STEP = 12;    // 自动滚动每帧滚多少像素
+
+const DND = {
+  on: false,
+  j: -1,
+  pane: null,
+  slot: null,      // { anchor, where: 'before'|'after', el }
+  lastY: 0,
+  edge: 0,
+  pump: 0,
+  ghost: null,
+  line: null,
+  srcEl: null,
+  ghostH: 0,
+};
+
+function addHandle(row, j, pane) {
+  const h = document.createElement('span');
+  h.className = 'drag-handle';
+  h.innerHTML = GRIP_SVG;
+  h.addEventListener('pointerdown', (e) => startDrag(e, j, pane, h));
+  h.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (DND.on) { cleanupDrag(); return; }
+    hideMenu();
+    pMenu(j, e.clientX, e.clientY);
+  });
+  row.appendChild(h);
+}
+
+function startDrag(e, j, pane, handle) {
+  if (e.button !== 0 || P.edit || P.renaming || !P.data) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const x0 = e.clientX, y0 = e.clientY;
+  let live = false;
+  const onMove = (ev) => {
+    if (!live) {
+      if (Math.abs(ev.clientX - x0) < 3 && Math.abs(ev.clientY - y0) < 3) return;
+      live = beginDrag(j, pane);
+      if (!live) { detach(); return; }
+    }
+    trackDrag(ev);
+  };
+  const onUp = (ev) => {
+    if (live) dropDrag(ev);
+    detach();
+  };
+  const onCancel = () => {
+    if (live) cleanupDrag();
+    detach();
+  };
+  function detach() {
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onCancel);
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* 行已重渲染 */ }
+  }
+  try { handle.setPointerCapture(e.pointerId); } catch (_) { return; }
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onCancel);
+}
+
+function beginDrag(j, pane) {
+  const row = [...pane.querySelectorAll('.row')].find((r) => Number(r.dataset.j) === j);
+  if (!row) return false;
+  DND.on = true;
+  DND.j = j;
+  DND.pane = pane;
+  DND.slot = null;
+  DND.srcEl = row;
+  row.classList.add('drag-src');
+
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost';
+  const text = document.createElement('span');
+  text.className = 'drag-ghost-text';
+  const lbl = row.querySelector('.label');
+  text.textContent = lbl ? lbl.textContent.replace(/^• /, '') : '';
+  ghost.appendChild(text);
+  ghost.style.width = `${Math.round(row.getBoundingClientRect().width)}px`;
+
+  const line = document.createElement('div');
+  line.className = 'drop-line';
+  line.style.display = 'none';
+  document.body.appendChild(ghost);
+  document.body.appendChild(line);
+  DND.ghost = ghost;
+  DND.line = line;
+  DND.ghostH = ghost.getBoundingClientRect().height;
+  document.body.classList.add('dragging');
+  return true;
+}
+
+function trackDrag(ev) {
+  if (!DND.on) return;
+  DND.lastY = ev.clientY;
+  if (DND.ghost) {
+    DND.ghost.style.left = `${ev.clientX + 16}px`;
+    DND.ghost.style.top = `${ev.clientY - Math.max(DND.ghostH / 2, 12)}px`;
+  }
+  DND.edge = edgeDir(ev.clientY);
+  if (DND.edge) startScrollPump(); else stopScrollPump();
+  refreshSlot();
+}
+
+/* 指针停进本栏上下 24px 就算进入滚动区；按住不动也继续滚（每帧 12px）。 */
+function edgeDir(y) {
+  if (!DND.pane) return 0;
+  const r = DND.pane.getBoundingClientRect();
+  if (y < r.top + EDGE_SCROLL) return -1;
+  if (y > r.bottom - EDGE_SCROLL) return 1;
+  return 0;
+}
+
+function startScrollPump() {
+  if (DND.pump) return;
+  DND.pump = requestAnimationFrame(function tick() {
+    if (!DND.on || !DND.edge) { stopScrollPump(); return; }
+    DND.pane.scrollTop += EDGE_STEP * DND.edge;
+    refreshSlot();
+    DND.pump = requestAnimationFrame(tick);
+  });
+}
+
+function stopScrollPump() {
+  if (DND.pump) { cancelAnimationFrame(DND.pump); DND.pump = 0; }
+}
+
+function refreshSlot() {
+  DND.slot = slotAt(DND.lastY);
+  drawLine();
+}
+
+function drawLine() {
+  if (!DND.line) return;
+  const slot = DND.slot;
+  if (!slot) { DND.line.style.display = 'none'; return; }
+  const r = slot.el.getBoundingClientRect();
+  const lbl = slot.el.querySelector('.label');
+  const left = (lbl || slot.el).getBoundingClientRect().left;
+  DND.line.style.display = 'block';
+  DND.line.style.top = `${Math.round((slot.where === 'before' ? r.top : r.bottom) - 1)}px`;
+  DND.line.style.left = `${Math.round(left)}px`;
+  DND.line.style.width = `${Math.max(0, Math.round(window.innerWidth - left - 8))}px`;
+}
+
+/* 指针高度 → 落点：只认本栏内的行，上半 = 之前，下半 = 之后。
+   指针移出本栏（比如从子待办栏拖到备注栏）就没有落点：跨栏不合法。 */
+function slotAt(y) {
+  if (!DND.pane) return null;
+  const pr = DND.pane.getBoundingClientRect();
+  if (y < pr.top || y > pr.bottom) return null;
+  const rows = [...DND.pane.querySelectorAll('.row')];
+  if (!rows.length) return null;
+  if (y < rows[0].getBoundingClientRect().top) {
+    return { anchor: Number(rows[0].dataset.j), where: 'before', el: rows[0] };
+  }
+  let hit = null, rect = null;
+  for (const r of rows) {
+    const rr = r.getBoundingClientRect();
+    if (y < rr.top) break;
+    hit = r;
+    rect = rr;
+  }
+  if (!hit) return null;
+  return {
+    anchor: Number(hit.dataset.j),
+    where: y < rect.top + rect.height / 2 ? 'before' : 'after',
+    el: hit,
+  };
+}
+
+function dropDrag(ev) {
+  const inside = ev.clientX >= 0 && ev.clientY >= 0
+    && ev.clientX <= window.innerWidth && ev.clientY <= window.innerHeight;
+  const slot = DND.slot;
+  const from = DND.j;
+  cleanupDrag();
+  if (!inside || !slot) return;
+  emitReq({ type: 'move', from, anchor: slot.anchor, where: slot.where });
+}
+
+function cleanupDrag() {
+  stopScrollPump();
+  if (DND.ghost) DND.ghost.remove();
+  if (DND.line) DND.line.remove();
+  if (DND.srcEl) DND.srcEl.classList.remove('drag-src');
+  document.body.classList.remove('dragging');
+  DND.on = false;
+  DND.j = -1;
+  DND.pane = null;
+  DND.slot = null;
+  DND.lastY = 0;
+  DND.edge = 0;
+  DND.ghost = null;
+  DND.line = null;
+  DND.srcEl = null;
+  DND.ghostH = 0;
 }
 
 /* ---------- 渲染（Tk render_panel 1225-1261） ---------- */
 
 function render(d) {
+  if (DND.on) cleanupDrag();   // 数据被重推（行要重建）时先收掉拖动浮层
   const s1 = paneTodo.scrollTop;
   const s2 = paneNote.scrollTop;
   titleEl.textContent = d.title;
@@ -282,12 +501,21 @@ for (const id of ['panel-x', 'add-todo', 'add-note']) {
 titleEl.addEventListener('dblclick', pRename);   // Tk 1132
 $('hdr').addEventListener('contextmenu', (e) => { e.preventDefault(); });
 
-/* Escape：编辑/改名先取消，否则关面板（Tk 1120 + 各 Entry 的 "break"） */
+/* Escape：先取消拖动，其次取消编辑/改名，否则关面板（Tk 1120 + 各 Entry 的 "break"） */
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (DND.on) { e.preventDefault(); cleanupDrag(); return; }
   if (P.edit || P.renaming) return;   // 编辑框自己的 handler 处理并 stopPropagation
   emitReq({ type: 'close' });
 });
+
+/* 拖动中右键 = 取消（捕获阶段，顺手吞掉这一下的行菜单） */
+document.addEventListener('contextmenu', (e) => {
+  if (!DND.on) return;
+  e.preventDefault();
+  e.stopPropagation();
+  cleanupDrag();
+}, true);
 
 /* ---------- 事件 ---------- */
 

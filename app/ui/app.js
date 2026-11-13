@@ -1,6 +1,7 @@
-/* 桌面待办 0.3.0 主窗口逻辑。
+/* 桌面待办 0.4.0 主窗口逻辑。
    与 todo.pyw (0.2.7) 逐函数对应，注释标注 Tk 源行号供 parity 审查。
-   纯函数来自 md.js（46 项 TDD），撤销栈来自 undo.js（6 项 TDD）。
+   纯函数来自 md.js（blockEnd/canMove/moveBlock 为 0.4.0 拖动排序新增），撤销栈来自 undo.js。
+   0.4.0 新增：拖动排序（Tk 0.2.7 没有，属 Tauri 侧扩展，两窗口各自窗口内）。
    入口是 ES module（import 需要真实 ESM；经典 script 会因 export 语法整体失效）。 */
 'use strict';
 
@@ -49,6 +50,25 @@ const S = {
 };
 
 const ROWS = new Map();  // i -> { row, label, box }
+const VIS = [];          // 可拖行（分组标题 / 待办）按文档顺序：[{ i, el }]
+
+/* 拖动排序状态（0.4.0）：pointer 自绘，不用 HTML5 DnD（WebView2 里不可靠）。 */
+const EDGE_SCROLL = 24;  // 指针进到窗口上下这么多像素内就开始自动滚动
+const EDGE_STEP = 12;    // 自动滚动每帧滚多少像素
+
+const DND = {
+  on: false,
+  from: -1,
+  slot: -1,
+  lastY: 0,        // 上一次指针高度：自动滚动时靠它重算落点
+  edge: 0,         // -1 上滚 / 1 下滚 / 0 不动
+  pump: 0,         // requestAnimationFrame id
+  lines: null,     // 起拖时的数组引用：轮询重载换了数组就放弃这次拖动
+  ghost: null,
+  line: null,
+  srcEl: null,
+  ghostH: 0,
+};
 
 /* ---------- 基础设施 ---------- */
 
@@ -235,6 +255,7 @@ function makeBadge(td, dn, nt) {
 }
 
 function renderList(focusIdx) {
+  if (DND.on) cleanupDrag();           // 重画行之前先收掉拖动浮层（外部重载可能把行换掉）
   const doc = document.scrollingElement;
   const max0 = doc.scrollHeight - doc.clientHeight;
   const frac = max0 > 0 ? doc.scrollTop / max0 : 0;
@@ -242,10 +263,14 @@ function renderList(focusIdx) {
   S.missingShown = false;
   listEl.textContent = '';
   ROWS.clear();
+  VIS.length = 0;
   let i = 0;
   while (i < S.lines.length) {
-    buildRow(i, S.lines[i]);
-    if (S.lines[i].kind === 'todo') {
+    const ln = S.lines[i];
+    // 0.4.0：备注只在详情面板里出现；顶格备注行静默隐藏但原样留在文件里。
+    if (ln.kind === 'note') { i += 1; continue; }
+    buildRow(i, ln);
+    if (ln.kind === 'todo') {
       i = md.subtreeEnd(S.lines, i);   // 待办的整个子块收进详情面板
     } else {
       i += 1;
@@ -311,8 +336,13 @@ function buildRow(i, ln) {
       row.appendChild(badge);
     }
   }
+  row.dataset.i = String(i);
   listEl.appendChild(row);
   ROWS.set(i, info);
+  if (ln.kind === 'header' || ln.kind === 'todo') {
+    addHandle(row, i);                     // 0.4.0：拖动把手只在可拖的行上
+    VIS.push({ i, el: row });
+  }
 }
 
 function bindRowMenu(el, i) {
@@ -485,10 +515,8 @@ async function addTodoEnd() {
 }
 
 function groupBlockEnd(i) {
-  // todo.pyw:981-986
-  let j = i + 1;
-  while (j < S.lines.length && S.lines[j].kind !== 'header') j += 1;
-  return j;
+  // todo.pyw:981-986；0.4.0 起与拖动排序共用同一个行块定义
+  return md.blockEnd(S.lines, i);
 }
 
 function insertGroup(i) {
@@ -511,6 +539,251 @@ function nextTodoIndent(i) {
     if (S.lines[j].kind === 'header' || S.lines[j].kind === 'blank') break;
   }
   return '';
+}
+
+/* ---------- 拖动排序（0.4.0） ----------
+   起拖只认行右缘的小把手；pointer 自绘浮层 + 插入线（HTML5 DnD 在 WebView2 里不可靠）。
+   落点只有行间插入，且永远落在整块边界：待办带走整棵子树，分组带走整组。
+   搬行本身是 md.js 的纯函数（blockEnd / allowsTopSlot / canMove / moveBlock，26 项 TDD）。 */
+
+const GRIP_SVG = '<svg viewBox="0 0 8 14" fill="none">'
+  + '<circle cx="2" cy="3" r="1.1" fill="currentColor"/><circle cx="6" cy="3" r="1.1" fill="currentColor"/>'
+  + '<circle cx="2" cy="7" r="1.1" fill="currentColor"/><circle cx="6" cy="7" r="1.1" fill="currentColor"/>'
+  + '<circle cx="2" cy="11" r="1.1" fill="currentColor"/><circle cx="6" cy="11" r="1.1" fill="currentColor"/>'
+  + '</svg>';
+
+function addHandle(row, i) {
+  const h = document.createElement('span');
+  h.className = 'drag-handle';
+  h.innerHTML = GRIP_SVG;
+  h.addEventListener('pointerdown', (e) => startDrag(e, i, h));
+  // 把手上的右键仍然是这一行的菜单（不落到整行空白菜单）
+  h.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (DND.on) { cleanupDrag(); return; }
+    hideMenu();
+    menuRow(i, e.clientX, e.clientY);
+  });
+  row.appendChild(h);
+}
+
+function startDrag(e, i, handle) {
+  if (e.button !== 0 || S.missingShown || !S.lines[i]) return;
+  e.preventDefault();          // 不夺焦点、不拖选文字
+  e.stopPropagation();
+  const x0 = e.clientX, y0 = e.clientY;
+  let live = false;
+  const onMove = (ev) => {
+    if (!live) {
+      if (Math.abs(ev.clientX - x0) < 3 && Math.abs(ev.clientY - y0) < 3) return;
+      live = beginDrag(i);
+      if (!live) { detach(); return; }
+    }
+    trackDrag(ev);
+  };
+  const onUp = (ev) => {
+    if (live) dropDrag(ev);
+    detach();
+  };
+  const onCancel = () => {
+    if (live) cleanupDrag();
+    detach();
+  };
+  function detach() {
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onCancel);
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* 行已重渲染 */ }
+  }
+  try { handle.setPointerCapture(e.pointerId); } catch (_) { return; }
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onCancel);
+}
+
+function beginDrag(i) {
+  closeEditor();                 // 静默提交，不重渲染（重渲染会换掉把手）
+  const ln = S.lines[i];
+  if (!ln) return false;
+  DND.on = true;
+  DND.from = i;
+  DND.slot = -1;
+  DND.lines = S.lines;
+  const info = ROWS.get(i);
+  DND.srcEl = info ? info.row : null;
+  if (DND.srcEl) DND.srcEl.classList.add('drag-src');
+
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost' + (ln.kind === 'header' ? ' drag-ghost-header' : '');
+  const text = document.createElement('span');
+  text.className = 'drag-ghost-text';
+  text.textContent = ln.text || '（空）';
+  ghost.appendChild(text);
+  const [td, , nt] = ln.kind === 'todo' ? md.subtreeStats(S.lines, i) : [0, 0, 0];
+  if (td + nt) {
+    const cnt = document.createElement('span');
+    cnt.className = 'drag-ghost-count';
+    cnt.textContent = `+${td + nt}`;
+    ghost.appendChild(cnt);
+  }
+  if (DND.srcEl) ghost.style.width = `${Math.round(DND.srcEl.getBoundingClientRect().width)}px`;
+
+  const line = document.createElement('div');
+  line.className = 'drop-line';
+  line.style.display = 'none';
+  document.body.appendChild(ghost);
+  document.body.appendChild(line);
+  DND.ghost = ghost;
+  DND.line = line;
+  DND.ghostH = ghost.getBoundingClientRect().height;
+  document.body.classList.add('dragging');
+  return true;
+}
+
+function trackDrag(ev) {
+  if (!DND.on) return;
+  if (S.lines !== DND.lines) { cleanupDrag(); return; }   // 文件被外部改过：放弃
+  DND.lastY = ev.clientY;
+  if (DND.ghost) {
+    DND.ghost.style.left = `${ev.clientX + 16}px`;
+    DND.ghost.style.top = `${ev.clientY - Math.max(DND.ghostH / 2, 12)}px`;
+  }
+  DND.edge = edgeDir(ev.clientY);
+  if (DND.edge) startScrollPump(); else stopScrollPump();
+  refreshSlot();
+}
+
+/* 指针停进窗口上下 24px 就算进入滚动区；按住不动也继续滚（每帧 12px）。 */
+function edgeDir(y) {
+  if (y < EDGE_SCROLL) return -1;
+  if (y > window.innerHeight - EDGE_SCROLL) return 1;
+  return 0;
+}
+
+function startScrollPump() {
+  if (DND.pump) return;
+  DND.pump = requestAnimationFrame(function tick() {
+    if (!DND.on || !DND.edge) { stopScrollPump(); return; }
+    window.scrollBy(0, EDGE_STEP * DND.edge);
+    refreshSlot();
+    DND.pump = requestAnimationFrame(tick);
+  });
+}
+
+function stopScrollPump() {
+  if (DND.pump) { cancelAnimationFrame(DND.pump); DND.pump = 0; }
+}
+
+function refreshSlot() {
+  DND.slot = slotAt(DND.lastY);
+  drawLine();
+}
+
+function drawLine() {
+  if (!DND.line) return;
+  const pos = DND.slot >= 0 ? slotPos(DND.slot) : null;
+  if (!pos) { DND.line.style.display = 'none'; return; }
+  DND.line.style.display = 'block';
+  DND.line.style.top = `${Math.round(pos.top - 1)}px`;
+  DND.line.style.left = `${Math.round(pos.left)}px`;
+  DND.line.style.width = `${Math.max(0, Math.round(pos.right - pos.left))}px`;
+}
+
+/* 指针高度 → 落点下标（插在这一行之前）。行间空白归上一行。
+   拖的是分组时只认组边界：上半落到本组之前，下半落到本组之后（= 下一组之前），
+   否则分组会插进别人组中间，把那一组的条目改归自己。 */
+function slotAt(y) {
+  if (!VIS.length) return -1;
+  if (y < VIS[0].el.getBoundingClientRect().top) return slotOK(VIS[0].i) ? VIS[0].i : -1;
+  let hit = -1, rect = null;
+  for (const v of VIS) {
+    const r = v.el.getBoundingClientRect();
+    if (y < r.top) break;
+    hit = v.i;
+    rect = r;
+  }
+  if (hit < 0) return -1;
+  const upper = y < rect.top + rect.height / 2;
+  let slot;
+  if (S.lines[DND.from].kind === 'header') {
+    const g = groupStart(hit);
+    if (g < 0) return -1;
+    slot = upper ? g : md.blockEnd(S.lines, g);
+  } else if (S.lines[hit].kind === 'header') {
+    slot = hit + 1;                       // 拖到组头 = 组首
+  } else {
+    slot = upper ? hit : md.blockEnd(S.lines, hit);
+  }
+  return slotOK(slot) ? slot : -1;
+}
+
+/* 这一行所属分组的标题下标；上面一个标题都没有时返回 -1。 */
+function groupStart(i) {
+  let k = i;
+  while (k > 0 && S.lines[k].kind !== 'header') k -= 1;
+  return S.lines[k].kind === 'header' ? k : -1;
+}
+
+function slotOK(slot) {
+  if (!(slot >= 0 && slot <= S.lines.length)) return false;
+  if (slot === 0 && !md.allowsTopSlot(S.lines)) return false;   // 第一组标题之前没有落点
+  return md.canMove(S.lines, DND.from, slot);
+}
+
+/* 落点的屏幕坐标：插入线从「下一可见行」的缩进位画到行右缘。 */
+function slotPos(slot) {
+  let next = null, prev = null;
+  for (const v of VIS) {
+    if (v.i < slot) prev = v;
+    else { next = v; break; }
+  }
+  if (next) {
+    const r = next.el.getBoundingClientRect();
+    return { top: r.top, left: labelLeft(next.el), right: r.right };
+  }
+  if (prev) {
+    const r = prev.el.getBoundingClientRect();
+    return { top: r.bottom, left: labelLeft(prev.el), right: r.right };
+  }
+  return null;
+}
+
+function labelLeft(row) {
+  const lbl = row.querySelector('.label');
+  return (lbl || row).getBoundingClientRect().left;
+}
+
+function dropDrag(ev) {
+  const inside = ev.clientX >= 0 && ev.clientY >= 0
+    && ev.clientX <= window.innerWidth && ev.clientY <= window.innerHeight;
+  const slot = DND.slot, from = DND.from;
+  const fresh = S.lines === DND.lines;   // 拖到一半文件被外部改过（轮询重载换了数组）就放弃
+  cleanupDrag();
+  if (!fresh || !inside || slot < 0) return;   // 拖出窗口或没有合法落点 = 取消，不写不记撤销
+  pushUndo();
+  S.lines = md.moveBlock(S.lines, from, slot, S.nl);
+  renderList();
+  scheduleSave();
+  log(`drag move ${from} -> ${slot}`);
+}
+
+function cleanupDrag() {
+  stopScrollPump();
+  if (DND.ghost) DND.ghost.remove();
+  if (DND.line) DND.line.remove();
+  if (DND.srcEl) DND.srcEl.classList.remove('drag-src');
+  document.body.classList.remove('dragging');
+  DND.on = false;
+  DND.from = -1;
+  DND.slot = -1;
+  DND.lastY = 0;
+  DND.edge = 0;
+  DND.lines = null;
+  DND.ghost = null;
+  DND.line = null;
+  DND.srcEl = null;
+  DND.ghostH = 0;
 }
 
 /* ---------- 右键菜单（todo.pyw:1041-1072, 1463-1486） ---------- */
@@ -695,6 +968,18 @@ function panelReqHandler(ev) {
     case 'add-note':
       pAddNote();
       break;
+    case 'move': {
+      // 0.4.0：面板里拖动排序（只在同一栏内，跨栏不合法）。真搬行只在这里做。
+      const to = d.where === 'before' ? d.anchor : md.blockEnd(S.lines, d.anchor);
+      if (md.canMove(S.lines, d.from, to)) {
+        pushUndo();
+        S.lines = md.moveBlock(S.lines, d.from, to, S.nl);
+        renderList();
+        scheduleSave();   // renderList 已经顺带 refreshPanel，面板行会重建
+        log(`panel drag move ${d.from} -> ${to}`);
+      }
+      break;
+    }
     case 'close':
       closePanel();
       break;
@@ -831,9 +1116,17 @@ function bindChrome() {
       e.preventDefault();
       undo();
     } else if (e.key === 'Escape') {
+      if (DND.on) { e.preventDefault(); cleanupDrag(); return; }   // 0.4.0：Esc 取消拖动
       hideMenu();
     }
   });
+  // 拖动中右键 = 取消（捕获阶段，顺手吞掉这一下的行菜单）
+  document.addEventListener('contextmenu', (e) => {
+    if (!DND.on) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cleanupDrag();
+  }, true);
   // 点击菜单外关闭
   document.addEventListener('mousedown', (e) => {
     if (!menuEl.contains(e.target)) hideMenu();

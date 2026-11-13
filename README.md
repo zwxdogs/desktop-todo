@@ -5,6 +5,7 @@
 ## 功能
 
 - 清单模式：单击方框勾选，双击待办打开详情面板，右键增删条目/分组
+- 拖动排序：鼠标移到某行右缘出现小把手，拖动即可把分组或待办搬到别处——待办带走整棵子块、分组带走整组；面板里子待办与备注各自排序
 - 详情面板：上栏子待办、下栏备注，两栏等高、各自滚动；每栏左下角分别是「＋ 添加子待办」「＋ 添加备注」
 - 内联编辑：双击文字改名，点编辑框以外的任何地方即结束并保存
 - 层级只有两级：待办 → 子待办（子待办是叶子，不再挂子项或备注）；文件里已有的更深行仍照常显示，程序不会改写
@@ -32,7 +33,7 @@ dist\DesktopTodo\DesktopTodo.exe <md文件路径> [float|x,y]
 node --test app/ui/*.test.js
 ```
 
-纯函数（Markdown 解析/序列化、子树、删除、缩进）与撤销栈共 57 项。
+纯函数（Markdown 解析/序列化、子树、删除、缩进、拖动排序）与撤销栈共 83 项。
 
 ## 构建
 
@@ -40,7 +41,7 @@ node --test app/ui/*.test.js
 powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 ```
 
-产物：`dist\DesktopTodo\DesktopTodo.exe`（单文件）与 `dist\DesktopTodo-0.3.0-win64.zip`。
+产物：`dist\DesktopTodo\DesktopTodo.exe`（单文件）与 `dist\DesktopTodo-0.4.0-win64.zip`。
 
 ## 本机部署（维护者）
 

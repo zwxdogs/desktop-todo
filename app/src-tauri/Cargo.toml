@@ -1,6 +1,6 @@
 [package]
 name = "desktop-todo"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "桌面待办 —— Markdown 待办清单固定在 Windows 桌面（Tauri 2）"
 

@@ -109,6 +109,71 @@ export function deleteSubtree(lines, i) {
   return lines.slice(0, i).concat(lines.slice(end));
 }
 
+// blockEnd：拖动排序时的「行块」结束位置（不含）。
+// 待办带走整棵子树；分组标题带走组内所有行，直到下一个标题（含组尾空行）；
+// 其余行自成一格。i 越界时退回 i+1。
+export function blockEnd(lines, i) {
+  if (!(i >= 0 && i < lines.length)) return i + 1;
+  const ln = lines[i];
+  if (ln.kind === 'todo') return subtreeEnd(lines, i);
+  if (ln.kind === 'header') {
+    let j = i + 1;
+    while (j < lines.length && lines[j].kind !== 'header') j += 1;
+    return j;
+  }
+  return i + 1;
+}
+
+// allowsTopSlot：文件里有分组标题时，第一个标题之前没有落点
+// （会造出不属于任何分组的顶层待办；开头是空行或顶格备注也不行）。
+export function allowsTopSlot(lines) {
+  return !lines.some((l) => l.kind === 'header');
+}
+
+// canMove：把 lines[from] 的行块搬到 insertAt（原下标，语义是「插在这一行之前」）是否算一次真移动。
+// 落回原位置、原块尾、或自己块内部都不算。
+// 两条边界规则：① 不许落到第一个分组标题之前；② 分组只能落在另一组的标题之前或文件末尾，
+// 插进别的组中间会让那一组的条目改归拖过来的组（静默并组）。
+export function canMove(lines, from, insertAt) {
+  if (!(from >= 0 && from < lines.length)) return false;
+  if (!(insertAt >= 0 && insertAt <= lines.length)) return false;
+  const end = blockEnd(lines, from);
+  if (insertAt === from || insertAt === end) return false;
+  if (insertAt > from && insertAt < end) return false;
+  if (!allowsTopSlot(lines) && insertAt <= firstHeader(lines)) return false;
+  if (lines[from].kind === 'header'
+      && insertAt !== lines.length && lines[insertAt].kind !== 'header') return false;
+  return true;
+}
+
+function firstHeader(lines) {
+  return lines.findIndex((l) => l.kind === 'header');
+}
+
+// 行尾缺换行时补一个，避免搬完之后两行粘成一行。只用于块尾与落点前一行。
+function withEnding(line, nl) {
+  if (line.raw.endsWith('\n')) return line;
+  return { ...line, raw: line.raw + nl };
+}
+
+// moveBlock：把 lines[from] 的行块搬到 insertAt，返回新数组（原数组不动）。
+// 不合法时（canMove 为假）返回等值副本，调用方不必先判。
+// 行块内部 raw 一字不动，缩进（tab / 空格混用）原样跟着走。
+export function moveBlock(lines, from, insertAt, nl = '\n') {
+  if (!canMove(lines, from, insertAt)) return lines.slice();
+  const end = blockEnd(lines, from);
+  let block = lines.slice(from, end);
+  let rest = lines.slice(0, from).concat(lines.slice(end));
+  const at = insertAt > end ? insertAt - block.length : insertAt;
+  if (at < rest.length) {
+    block = block.slice(0, -1).concat([withEnding(block[block.length - 1], nl)]);
+  }
+  if (at > 0 && !rest[at - 1].raw.endsWith('\n')) {
+    rest = rest.slice(0, at - 1).concat([withEnding(rest[at - 1], nl)], rest.slice(at));
+  }
+  return rest.slice(0, at).concat(block, rest.slice(at));
+}
+
 // childIndent：子项缩进，对齐到父条目正文位置（todo.pyw:151-157）。
 // todo 对齐 "- [ ] " 之后（units + len(marker) + 6），其余对齐 "- " 之后（units + len(marker) + 2）。
 export function childIndent(line) {
