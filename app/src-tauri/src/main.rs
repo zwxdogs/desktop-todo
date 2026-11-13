@@ -25,6 +25,10 @@ const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_FRAMECHANGED: u32 = 0x0020;
+// DWM 圆角偏好（Win11）：工具窗默认不圆、也没有投影，必须显式要 ROUND 才和普通窗口一致。
+const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+const DWMWCP_DEFAULT: u32 = 0;
+const DWMWCP_ROUND: u32 = 2;
 
 // #5777 workaround 参数（Win11 Build 26200 GPU/AudioService 沙箱崩溃循环）。
 // additional_browser_args 会覆盖 wry 默认值，故 msWebOOUI 等常规禁用项也要自带。
@@ -46,6 +50,11 @@ extern "system" {
     fn SetWindowLongW(hwnd: isize, index: i32, value: i64) -> i64;
     fn IsIconic(hwnd: isize) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
+}
+
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(hwnd: isize, attr: u32, value: *const std::os::raw::c_void, size: u32) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -205,6 +214,22 @@ fn win_hwnd(win: &WebviewWindow) -> Option<isize> {
     win.hwnd().ok().map(|h| h.0 as isize)
 }
 
+// WS_EX_TOOLWINDOW 会让 DWM 跳过系统圆角与投影：Win11 实测（2026-11-13，[#9]）工具窗四角是直角、
+// 窗外没有阴影，切回普通窗口两样都回来。两态必须看起来是同一个窗口，所以固定在桌面时显式要
+// DWMWCP_ROUND；普通窗口回落 DEFAULT（系统本来就会给它圆角）。实测工具窗 + ROUND 的像素与非工具窗
+// 完全一致，说明投影也随之回来。样式改完（FRAMECHANGED）之后再落这个属性，DWM 按最终 exstyle 重算。
+fn set_corner_preference(hwnd: isize, round: bool) {
+    let pref: u32 = if round { DWMWCP_ROUND } else { DWMWCP_DEFAULT };
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const u32 as *const std::os::raw::c_void,
+            4,
+        );
+    }
+}
+
 // 把 dock_style 落到窗口上。顺序有讲究，任何一步都不能随便挪：
 // 1) tao 的旗子先落——tao 的 set_window_flags 只要 diff 非空，就按它内部的 WindowFlags 整份重写
 //    GWL_STYLE/GWL_EXSTYLE（window_state.rs apply_diff → to_window_styles），ON_TASKBAR 时还会
@@ -212,6 +237,7 @@ fn win_hwnd(win: &WebviewWindow) -> Option<isize> {
 //    清 ALWAYS_ON_BOTTOM 也必须在最前：tao 的 WM_WINDOWPOSCHANGING handler 在该 flag 存在时会把
 //    每次 SetWindowPos 的 hwndInsertAfter 强制改写为 HWND_BOTTOM，不清除则普通窗口永远浮不上来。
 // 2) 再落 TOOLWINDOW/APPWINDOW 这对互斥手工位（tao 不认识它们，见 set_ex_flags）。
+//    紧跟一步把 DWM 圆角偏好对齐（见 set_corner_preference）：工具窗默认直角无投影，两态会不像同一个窗口。
 // 3) ITaskbarList::DeleteTab/AddTab 开关任务栏按钮（TOOLWINDOW 只挡 Alt+Tab 与新建按钮）。
 // 4) 固定在桌面时最后 pin_bottom：上面 FRAMECHANGED 那一下会把窗口提到最前，压底必须排在它之后。
 // 不需要再靠 hide/show 让 shell 重算归属：SWP_FRAMECHANGED + ITaskbarList 已经够用，窗口不会闪。
@@ -222,6 +248,7 @@ fn apply_docked(win: &WebviewWindow, docked: bool) {
     let _ = win.set_always_on_top(style.always_on_top);
     if let Some(h) = hwnd {
         set_ex_flags(h, style.toolwindow);
+        set_corner_preference(h, style.toolwindow);
     }
     let _ = win.set_skip_taskbar(style.skip_taskbar);
     if style.always_on_bottom {
