@@ -22,14 +22,7 @@ roundtrip_check.py
 build/
 dist/
 
-# ---- Tauri 2 spike (2026-11) ----
-spike/tauri2/src-tauri/target/
-spike/tauri2/src-tauri/Cargo.lock.bak
-spike/wvprobe/target/
-spike/tauri2/src-tauri/gen/
-
 # ---- Tauri 2 应用（2026-11 迁移）----
 app/src-tauri/target/
 app/src-tauri/gen/
 app/src-tauri/Cargo.lock.bak
-ui_audit/
