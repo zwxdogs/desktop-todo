@@ -33,7 +33,7 @@ dist\DesktopTodo\DesktopTodo.exe <md文件路径> [float|x,y]
 node --test app/ui/*.test.js
 ```
 
-纯函数（Markdown 解析/序列化、子树、删除、缩进、拖动排序）与撤销栈共 83 项。
+纯函数（Markdown 解析/序列化、子树、删除、缩进、拖动排序、滚动条几何）与撤销栈共 106 项。
 
 ## 构建
 
@@ -41,7 +41,7 @@ node --test app/ui/*.test.js
 powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 ```
 
-产物：`dist\DesktopTodo\DesktopTodo.exe`（单文件）与 `dist\DesktopTodo-0.4.0-win64.zip`。
+产物：`dist\DesktopTodo\DesktopTodo.exe`（单文件）与 `dist\DesktopTodo-<版本>-win64.zip`（版本取自 `app\src-tauri\tauri.conf.json`）。
 
 ## 本机部署（维护者）
 
