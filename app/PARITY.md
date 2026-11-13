@@ -55,13 +55,13 @@
 | _next_todo_indent(1454) | app.js nextTodoIndent | 等效 |
 | choose_file(1488) | app.js chooseFile + Rust rfd（initdir/过滤器；path 落 Rust Shared.file） | 等效 |
 | open_file_location(1499) | Rust open_file_location（explorer /select、"路径"；父目录；双不存在弹窗） | 等效 |
-| toggle_dock/_update_pin(1517-1538) | app.js toggleDock/updatePin + Rust set_docked（topmost/pin_bottom） | 等效 |
+| toggle_dock/_update_pin(1517-1538) | app.js toggleDock/updatePin + Rust set_docked_state/apply_docked（点亮=固定在桌面：压底+TOOLWINDOW+无任务栏；不点亮=普通窗口：正常 z 序+任务栏图标；两态都不 topmost） | 语义改写（ADR 0004） |
 | poll(1541) | Rust poll_tick（贴桌面维持/Win+D 还原/面板 topmost 自愈/离屏救援）+ app.js（文件变化/missing） | 等效 |
 | 拖动(1602) | data-tauri-drag-region（原生拖动） | 等效* |
 | 缩放 grip(1606) | Rust resize_start（系统原生 SE 向 resize） | 等效* |
 | save_config(1620) | Rust write_config（py_json_string 逐字节对齐 json.dump indent=1） | 等效 |
 | on_close(1633) | app.js exitApp + Rust exit_app（commit→关面板→存盘→config→退出） | 等效 |
-| main(1671) | Rust main（argv 测试模式/互斥体/尺寸 clamp/默认位/启动序列） | 等效 |
+| main(1671) | Rust main（argv 测试模式/互斥体/尺寸 clamp/默认位=普通窗口/启动序列/托盘） | 等效 |
 | 1s 外部变化轮询 | JS pollTick 1s + Rust poll_tick | 等效 |
 
 \* 菜单与拖拽的载体差异见 §3。
@@ -69,7 +69,7 @@
 ## 3. 有意的载体差异（行为一致或已获批）
 
 1. **菜单**：Tk 原生 `tk_popup` → 自绘 HTML 菜单（白底圆角阴影）。菜单项、顺序、sep、点击语义逐项一致；视觉是 0.2.7 视觉语言的自然延伸（同 Phase 0 批准的设计方向）。
-2. **主窗口进任务栏**：用户唯一点名的新行为（m00554）。面板仍不进任务栏（skip_taskbar）。
+2. **主窗口两态（ADR 0004，0.4.0）**：Tk 0.2.7 的 📌 是「贴桌面 / 悬浮置顶」，且贴桌面时任务栏没有入口。用户 2026-11-13 定稿改为「固定在桌面 / 普通窗口」：固定在桌面 = 桌面图标之上、所有应用窗口之下，任务栏与 Alt+Tab 里都没有它（`WS_EX_TOOLWINDOW` + `ITaskbarList::DeleteTab`）；普通窗口 = 正常 z 序、任务栏有图标、Alt+Tab 里有它，点任务栏图标就能加待办；默认普通窗口。置顶功能整体下线（两种模式都不 topmost），新增常驻托盘（左键唤回普通窗口，右键菜单切模式/退出），面板仍不进任务栏且保持 topmost。
 3. **拖动/缩放手势**：Tk 手动 geometry → 系统原生拖动/resize。手感更好；位置尺寸记账经 Moved/Resized → dirty_config → ≤1s 内落盘（Tk 是 release 时写）。
 4. **跨窗面板通信**：Tk 直接调 self 方法 → main↔panel 事件。面板编辑提交瞬间有一次旧值→新值的重渲染（Tk 是同步刷新），≤1 帧。
 5. **测试日志**：testing 模式写 `widget.log`（saved/loaded/panel/undo 等状态迁移，与 Tk 0.2.7 的 widget.log 同层级）；生产模式不写日志文件。调试期探针（click trace、按钮 client 坐标、toggle 栈、client_to_screen）已全部删除。
@@ -79,10 +79,11 @@
 
 ## 4. 验证状态
 
-- [x] 纯函数 TDD 78/78（`node --test app/ui/*.test.js`，2026-11-13）
+- [x] 纯函数 TDD 83/83（`node --test app/ui/*.test.js`，2026-11-13）
 - [x] Rust release 编译通过（`app\build.ps1`，产物 `dist\DesktopTodo\DesktopTodo.exe`，2026-11-13）
 - [x] TEST_MODE 运行时 parity：勾选/行内编辑/删除/Ctrl+Z/面板开合与内容/改名/删除、两次启动无漂移、Win+D 自愈、拖动与 grip 落盘（2026-11-13，票 #1）
 - [x] 人工视觉对比（0.2.7 vs 0.3.0 截图；行距 26px、勾选框/文字/徽标同中线，用户确认）
 - [x] 0.4.0 拖动排序：md.js 纯函数 26 项 TDD + DOM 侧主窗口/面板接入（2026-11-13）
 - [x] 0.4.0 code-review（Standards + Spec 两轴，2026-11-13）：已修「分组拖进别人组中间会静默并组」「开头有杂物时仍能落到第一组之前」「拖到一半文件被外部改过仍按旧下标落点」「面板不认跨栏」「边缘滚动只在动鼠标时生效」「插入线右端/徽标让位未写进 PARITY」；两窗重复的拖动引擎记录为后续可抽 app/ui/dnd.js，不阻塞本次交付
 - [x] code-review（Standards + Spec 两轴，2026-11-13）：4 条硬违规已修（fixture 移入 app/ui/fixtures/、测试命令路径统一、md.js 头注释、删除无调用者的 show_message）；重复菜单/commit 四连/Rust hwnd 锁辅助等判据项记录为后续重构，不阻塞本次交付
+- [x] ADR 0004 两态 + 托盘（2026-11-13）：Rust `dock_style` 3 项单测通过；实机探针复核——固定在桌面时主窗口 `ex=0x190`（TOOLWINDOW=True、APPWINDOW=False，无 topmost）且 z 序贴近桌面层（1115 条链里第 1108 位，在所有应用窗口之下）；普通窗口 `ex=0x40110`（APPWINDOW=True、TOOLWINDOW=False）且 z 序在前；托盘 `tray_icon_app` 两模式均在。踩到的坑写进代码注释：首次 `ShowWindow` 会按建窗时样式重算 exstyle，显示前设的 TOOLWINDOW 会被抹掉，必须显示后再落一次（面板 `panel_open` 同理）

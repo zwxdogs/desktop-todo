@@ -36,7 +36,7 @@ const S = {
   nl: '\n',
   hasBom: false,   // Tk has_bom 存实例：最近一次读到的 BOM 状态，写回沿用
   lastSeen: null,
-  docked: true,
+  docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
   edit: null,            // { index, input }
   panelOpen: false,
@@ -1024,16 +1024,19 @@ async function chooseFile() {
 }
 
 function toggleDock() {
-  // todo.pyw:1517-1527
+  // ADR 0004：点亮 = 固定在桌面（桌面图标之上、任务栏与 Alt+Tab 里都没有）；
+  // 未点亮 = 普通窗口（正常 z 序、任务栏有图标）。窗口样式由 Rust 统一落，回发 dock-changed。
   S.docked = !S.docked;
-  invoke('set_docked', { docked: S.docked });
   updatePin();
+  invoke('set_docked', { docked: S.docked });
   invoke('save_config');
 }
 
 function updatePin() {
-  // todo.pyw:1529-1538：悬浮置顶点亮
-  $('btn-pin').classList.toggle('lit', !S.docked);
+  // 点亮即"已固定"，title 说明当前模式
+  const btn = $('btn-pin');
+  btn.classList.toggle('lit', S.docked);
+  btn.title = S.docked ? '固定在桌面' : '普通窗口';
 }
 
 /* ---------- 外部变化轮询（todo.pyw:1541-1574 的文件部分） ---------- */
@@ -1138,13 +1141,18 @@ function bindChrome() {
 async function boot() {
   const info = await invoke('app_info');
   S.file = info.file;
-  S.docked = info.docked !== undefined ? !!info.docked : true;
+  S.docked = info.docked !== undefined ? !!info.docked : false;
   setTitle(info.title || '桌面待办');
   updatePin();
 
   bindChrome();
   await window.__TAURI__.event.listen('panel-req', panelReqHandler);
   await window.__TAURI__.event.listen('app-exit-request', () => exitApp());
+  await window.__TAURI__.event.listen('dock-changed', (e) => {
+    // 托盘菜单切模式时由 Rust 广播：按状态重算，别信本地翻转
+    S.docked = !!e.payload;
+    updatePin();
+  });
   await window.__TAURI__.event.listen('panel-close', () => {
     // Rust 侧面板被系统关闭（Alt+F4 等）→ 主窗口同步清状态
     S.panelOpen = false;
