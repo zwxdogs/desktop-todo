@@ -1,13 +1,15 @@
-/* 桌面待办 0.4.0 主窗口逻辑。
+/* 桌面待办 0.4.1 主窗口逻辑。
    与 todo.pyw (0.2.7) 逐函数对应，注释标注 Tk 源行号供 parity 审查。
    纯函数来自 md.js（blockEnd/canMove/moveBlock 为 0.4.0 拖动排序新增），撤销栈来自 undo.js。
    0.4.0 新增：拖动排序（Tk 0.2.7 没有，属 Tauri 侧扩展，两窗口各自窗口内）。
+   0.4.1：页面不再滚动，#list 自己滚并挂自绘滚动条（scrollbar.js）；滚动位置改在 #list 上存取。
    入口是 ES module（import 需要真实 ESM；经典 script 会因 export 语法整体失效）。 */
 'use strict';
 
 import * as md from './md.js';
 import { createUndoStack } from './undo.js';
 import { starterText, missingHint } from './starter.js';
+import { attachScrollbar } from './scrollbar.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -30,6 +32,7 @@ const $ = (id) => document.getElementById(id);
 const listEl = $('list');
 const titleEl = $('title');
 const menuEl = $('menu');
+let mainScroll = null;   // 自绘滚动条（0.4.1；bindChrome 里挂到 listEl 上）
 
 const S = {
   lines: [],
@@ -269,9 +272,9 @@ function makeBadge(td, dn, nt) {
 
 function renderList(focusIdx) {
   if (DND.on) cleanupDrag();           // 重画行之前先收掉拖动浮层（外部重载可能把行换掉）
-  const doc = document.scrollingElement;
-  const max0 = doc.scrollHeight - doc.clientHeight;
-  const frac = max0 > 0 ? doc.scrollTop / max0 : 0;
+  const sc = listEl;                   // 0.4.1：滚动容器是 #list（页面本身不再滚）
+  const max0 = sc.scrollHeight - sc.clientHeight;
+  const frac = max0 > 0 ? sc.scrollTop / max0 : 0;
   closeEditor();                       // 静默提交，不重渲染（todo.pyw:607）
   S.missingShown = false;
   listEl.textContent = '';
@@ -289,7 +292,8 @@ function renderList(focusIdx) {
       i += 1;
     }
   }
-  doc.scrollTop = frac * (doc.scrollHeight - doc.clientHeight);
+  sc.scrollTop = frac * (sc.scrollHeight - sc.clientHeight);
+  if (mainScroll) mainScroll.refresh();  // 行数变了：拇指长度要重算（静默，不闪）
   refreshPanel(focusIdx);              // 主列表是清单渲染的唯一出口
 }
 
@@ -665,10 +669,13 @@ function trackDrag(ev) {
   refreshSlot();
 }
 
-/* 指针停进窗口上下 24px 就算进入滚动区；按住不动也继续滚（每帧 12px）。 */
+/* 指针进到清单区上下 24px 内就算进入滚动区；按住不动也继续滚（每帧 12px）。
+   0.4.1：边界取 #list 的矩形而不是窗口。指针越过清单顶边（连标题栏那段）算"上边缘"——
+   拖动时想让列表往上翻，手不必停在带子里；标题栏的滚轮仍然不滚内容。 */
 function edgeDir(y) {
-  if (y < EDGE_SCROLL) return -1;
-  if (y > window.innerHeight - EDGE_SCROLL) return 1;
+  const r = listEl.getBoundingClientRect();
+  if (y < r.top + EDGE_SCROLL) return -1;
+  if (y > r.bottom - EDGE_SCROLL) return 1;
   return 0;
 }
 
@@ -676,7 +683,7 @@ function startScrollPump() {
   if (DND.pump) return;
   DND.pump = requestAnimationFrame(function tick() {
     if (!DND.on || !DND.edge) { stopScrollPump(); return; }
-    window.scrollBy(0, EDGE_STEP * DND.edge);
+    listEl.scrollTop += EDGE_STEP * DND.edge;
     refreshSlot();
     DND.pump = requestAnimationFrame(tick);
   });
@@ -1191,6 +1198,8 @@ function bindChrome() {
     if (e.button === 0) invoke('resize_start');
   });
   bindBlankContext($('grip'));
+  // 自绘滚动条（0.4.1）：底部让开 22px，不压右下角的缩放把手
+  mainScroll = attachScrollbar(listEl, { bottomInset: 22 });
   // 列表空白（含尾部 padding）
   listEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();

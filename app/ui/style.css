@@ -9,28 +9,25 @@
 html, body {
   height: 100%;
   margin: 0;
+  overflow: hidden;   /* 0.4.1：页面不再滚动，改由 #list 自己滚（滚动条才只落在内容右侧） */
 }
 
 body {
-  /* 窗口 1px 发丝描边（Tk shell 外框 C_HAIRLINE）+ 唯一滚动容器 */
+  /* 窗口 1px 发丝描边（Tk shell 外框 C_HAIRLINE）+ 竖向 flex 壳：顶栏固定，清单区吃满余下高度 */
   border: 1px solid #E1E6ED;
   background: #FAFBFC;
   color: #24292F;
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   font-size: 10pt;
-  overflow-y: auto;
-  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
   user-select: none;
   cursor: default;
-  scrollbar-width: none;          /* Tk 0.2.7 无滚动条，仅滚轮 */
 }
-body::-webkit-scrollbar { display: none; }
 
 /* ---------- 顶栏（主窗口 / 面板共用 34 规格） ---------- */
 #hdr {
-  position: sticky;
-  top: 0;
-  z-index: 20;
+  flex: 0 0 34px;
   height: 34px;
   background: #EDF0F4;
   border-bottom: 1px solid #DFE4EA;   /* 发丝线分界 */
@@ -87,11 +84,16 @@ body::-webkit-scrollbar { display: none; }
   pointer-events: none;
 }
 
-/* ---------- 清单区 ---------- */
+/* ---------- 清单区（0.4.1 起是全窗口唯一的滚动容器） ---------- */
 #list {
+  flex: 1;
+  min-height: 0;           /* flex 子项允许收缩，否则内容再长也不滚 */
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-bottom: 28px;    /* Tk 尾部 28 占位条（空白右键菜单区） */
-  min-height: calc(100vh - 35px - 28px);
+  scrollbar-width: none;   /* 原生条藏掉：换成 scrollbar.js 的自绘条 */
 }
+#list::-webkit-scrollbar { display: none; }
 
 .gap { height: 8px; }      /* Tk blank 行 */
 
@@ -273,6 +275,36 @@ body.dragging .row:hover .badge { transform: none; }
 #grip svg { width: 100%; height: 100%; display: block; }
 #grip:hover .grip-line { stroke: #8B95A1; }
 
+/* ---------- 自绘滚动条（0.4.1；DOM/逻辑在 scrollbar.js） ---------- */
+/* 浮层：固定定位，位置由 JS 按滚动容器的矩形算；只有拇指吃鼠标，轨道区点得到下面的内容。
+   淡入 120ms、停手 900ms 后淡出 350ms；系统关动画时直接显隐。 */
+.vscroll {
+  position: fixed;
+  z-index: 25;             /* 高于行，低于右键菜单(100)/拖动浮层(200)/缩放把手(30) */
+  width: 6px;
+  opacity: 0;
+  pointer-events: none;
+  display: none;
+  transition: opacity .35s ease;
+}
+.vscroll.on { display: block; }
+.vscroll.show { opacity: 1; transition-duration: .12s; }
+.vscroll-thumb {
+  position: absolute;
+  left: 0;
+  width: 6px;
+  border-radius: 3px;
+  background: rgba(36, 41, 47, .32);
+  pointer-events: none;    /* 隐藏时不能挡住内容 */
+  transition: background-color .12s;
+}
+.vscroll.show .vscroll-thumb { pointer-events: auto; }
+.vscroll-thumb:hover { background: rgba(36, 41, 47, .5); }
+.vscroll.dragging .vscroll-thumb { background: rgba(36, 41, 47, .62); }
+@media (prefers-reduced-motion: reduce) {
+  .vscroll { transition: none; }
+}
+
 /* ---------- 缺文件占位 ---------- */
 .missing {
   margin: 40px auto;
@@ -312,7 +344,8 @@ body.dragging .row:hover .badge { transform: none; }
 
 /* ---------- 详情面板 ---------- */
 #panel-body {
-  height: calc(100vh - 35px);
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-rows: 1fr 1px 1fr;   /* Tk uniform: 两栏严格 1:1 */
 }

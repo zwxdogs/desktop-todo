@@ -6,6 +6,8 @@
    0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。 */
 'use strict';
 
+import { attachScrollbar } from './scrollbar.js';
+
 /* __TAURI__ 由注入脚本在页面加载后写入，panel.js 可能先于它执行（与 app.js 早期同类竞态）。
    因此所有 IPC 都等就绪后再发；就绪前产生的请求排队，就绪后补发。 */
 let TAURI = null;
@@ -27,6 +29,9 @@ const titleEl = $('panel-title');
 const titleEdit = $('panel-title-edit');
 const paneTodo = $('pane-todos');
 const paneNote = $('pane-notes');
+// 自绘滚动条（0.4.1）：两栏各一条，各自独立显隐
+const scrollTodos = attachScrollbar(paneTodo);
+const scrollNotes = attachScrollbar(paneNote);
 
 const P = {
   data: null,          // 最近一次 panel-data
@@ -331,6 +336,8 @@ function render(d) {
   }
   paneTodo.scrollTop = s1;
   paneNote.scrollTop = s2;
+  scrollTodos.refresh();    // 0.4.1：两栏行数变了，拇指长度重算（静默，不闪）
+  scrollNotes.refresh();
   if (focusLabel) pEditAt(focusLabel);
 }
 
