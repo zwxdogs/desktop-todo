@@ -205,24 +205,26 @@ fn win_hwnd(win: &WebviewWindow) -> Option<isize> {
     win.hwnd().ok().map(|h| h.0 as isize)
 }
 
-// 把 dock_style 落到窗口上。顺序有讲究：
-// 1) 先清 ALWAYS_ON_BOTTOM——tao 的 WM_WINDOWPOSCHANGING handler 在该 flag 存在时会把每次
-//    SetWindowPos 的 hwndInsertAfter 强制改写为 HWND_BOTTOM，不清除则普通窗口永远浮不上来。
-// 2) TOOLWINDOW 的 FRAMECHANGED 那一下会把窗口提到最前；固定在桌面时后面再用 pin_bottom 压回去。
+// 把 dock_style 落到窗口上。顺序有讲究，任何一步都不能随便挪：
+// 1) tao 的旗子先落——tao 的 set_window_flags 只要 diff 非空，就按它内部的 WindowFlags 整份重写
+//    GWL_STYLE/GWL_EXSTYLE（window_state.rs apply_diff → to_window_styles），ON_TASKBAR 时还会
+//    补回 WS_EX_APPWINDOW；排在手工位之后就会把 TOOLWINDOW 抹掉。
+//    清 ALWAYS_ON_BOTTOM 也必须在最前：tao 的 WM_WINDOWPOSCHANGING handler 在该 flag 存在时会把
+//    每次 SetWindowPos 的 hwndInsertAfter 强制改写为 HWND_BOTTOM，不清除则普通窗口永远浮不上来。
+// 2) 再落 TOOLWINDOW/APPWINDOW 这对互斥手工位（tao 不认识它们，见 set_ex_flags）。
+// 3) ITaskbarList::DeleteTab/AddTab 开关任务栏按钮（TOOLWINDOW 只挡 Alt+Tab 与新建按钮）。
+// 4) 固定在桌面时最后 pin_bottom：上面 FRAMECHANGED 那一下会把窗口提到最前，压底必须排在它之后。
+// 不需要再靠 hide/show 让 shell 重算归属：SWP_FRAMECHANGED + ITaskbarList 已经够用，窗口不会闪。
 fn apply_docked(win: &WebviewWindow, docked: bool) {
     let style = dock_style(docked);
     let hwnd = win_hwnd(win);
-    if !style.always_on_bottom {
-        let _ = win.set_always_on_bottom(false);
-    }
+    let _ = win.set_always_on_bottom(style.always_on_bottom);
     let _ = win.set_always_on_top(style.always_on_top);
     if let Some(h) = hwnd {
         set_ex_flags(h, style.toolwindow);
     }
-    // ITaskbarList::DeleteTab/AddTab：任务栏按钮的开关（TOOLWINDOW 只挡 Alt+Tab 与新建按钮）
     let _ = win.set_skip_taskbar(style.skip_taskbar);
     if style.always_on_bottom {
-        let _ = win.set_always_on_bottom(true);
         if let Some(h) = hwnd {
             pin_bottom(h);
         }
@@ -444,21 +446,14 @@ fn save_config(app: AppHandle) {
 // 切换两态的唯一入口（命令、托盘、启动都走这里）：落状态 → 落窗口样式 → 同步托盘勾选 → 存盘。
 // 注意：本函数会在主线程被调用（tauri 同步命令跑在主线程），所以内部不许有阻塞主线程的调用。
 fn set_docked_state(app: &AppHandle, docked: bool) {
-    let changed = {
+    {
         let st = app.state::<Mutex<Shared>>();
         let mut s = st.lock().unwrap();
-        let changed = s.docked != docked;
         s.docked = docked;
-        changed
-    };
+    }
     if let Some(win) = app.get_webview_window("main") {
-        if changed {
-            // 切模式时让 shell 重算任务栏与 Alt+Tab 归属：隐藏 → 落样式 → 显示 → 再落一次。
-            // 用户接受这一下闪烁（ADR 0004）；首次 ShowWindow 会按建窗时样式覆盖 exstyle。
-            let _ = win.hide();
-            apply_docked(&win, docked);
-            let _ = win.show();
-        }
+        // 就地落样式，不 hide/show：隐藏再显示那一下就是用户看到的整窗闪烁。
+        // 任务栏与 Alt+Tab 归属由 apply_docked 里的 ITaskbarList + SWP_FRAMECHANGED 让 shell 重算。
         apply_docked(&win, docked);
     }
     sync_tray_check(app);
