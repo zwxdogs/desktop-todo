@@ -7,6 +7,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -33,8 +34,17 @@ const DWMWCP_ROUND: u32 = 2;
 // #5777 workaround 参数（Win11 Build 26200 GPU/AudioService 沙箱崩溃循环）。
 // additional_browser_args 会覆盖 wry 默认值，故 msWebOOUI 等常规禁用项也要自带。
 const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AudioServiceSandbox --no-sandbox --disable-gpu-sandbox";
-const MUTEX_NAME: &str = "Zwx_DesktopTodoWidget_Mutex";
+// 自动重启专用参数：新实例要等老进程把单实例锁放掉再接管（见 main 里的文件锁循环）
+const RESTART_ARG: &str = "--wait-mutex";
 const APP_NAME: &str = "桌面待办";
+// 退出宽限（ADR 0008）：JS 收到 app-exit-request 后要提交编辑、写盘再调 exit_app。
+// 写盘是 tmp+rename 的原子替换，所以到点强退不会写坏文件；等不到 JS 也必须退。
+const EXIT_GRACE: Duration = Duration::from_millis(2500);
+// 看门狗阈值（ADR 0008）：页面连加载都没完成 → 12s；JS 起过但心跳停了 → 20s。
+// 正常启动慢盘/大文件也就几秒，取够宽松，宁可晚点救也不要误 reload 丢未提交编辑。
+const WATCHDOG_LOAD_LIMIT: Duration = Duration::from_secs(12);
+const WATCHDOG_BEAT_LIMIT: Duration = Duration::from_secs(20);
+const WATCHDOG_MAX_RELOADS: u32 = 3;
 // 托盘菜单项 id（菜单构建与事件匹配共用，避免字符串两处各写一遍）
 const TRAY_SHOW: &str = "tray-show";
 const TRAY_DOCK: &str = "tray-dock";
@@ -59,9 +69,15 @@ extern "system" {
 
 #[link(name = "kernel32")]
 extern "system" {
-    fn CreateMutexW(attrs: *const u8, initial: i32, name: *const u16) -> isize;
-    fn SetLastError(code: u32);
-    fn GetLastError() -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        attrs: *const u8,
+        disposition: u32,
+        flags: u32,
+        template: isize,
+    ) -> isize;
     fn GetLocalTime(out: *mut SYSTEMTIME);
 }
 
@@ -96,6 +112,18 @@ struct Shared {
     ro_warned: bool,
     dirty_config: bool, // Moved/Resized 置位，poll_tick 里统一落盘（≈Tk 拖完松手保存）
     log_path: Option<PathBuf>,
+    // ---- 界面存活看门狗（ADR 0008）----
+    // 白屏有两种死法，都要能自救：① 页面根本没加载（shown_at 之后一直没动静）；
+    // ② 页面加载过、WebView2 进程后来死了（心跳停）。两种都不该把用户锁在关不掉的窗口里。
+    shown_at: Instant,   // 主窗 show() 的时刻，boot 成功 / reload 时重置
+    page_loaded: bool,   // on_page_load 收到过 Finished
+    last_beat: Instant,  // 最近一次 JS 心跳（ui 里 setInterval 每秒一次）
+    js_ready: bool,      // JS boot 跑完过一次
+    reloads: u32,        // 已自救 reload 次数
+    exiting: bool,       // 退出流程已开始，看门狗停手
+    gave_up: bool,       // 放弃自救只记一次日志（退出仍然可用）
+    can_restart: bool,   // 这次运行还允许自动重启一次（防连环重启）
+    restart_marker: PathBuf, // 重启标记文件：页面成功加载后删掉
 }
 
 impl Shared {
@@ -511,12 +539,57 @@ fn on_tray_menu(app: &AppHandle, id: &str) {
             let next = !is_docked(app);
             set_docked_state(app, next);
         }
-        // 与 Alt+F4 / 任务栏关闭同路径：交给 JS 提交编辑、写盘，再 exit_app
-        TRAY_QUIT => {
-            let _ = app.emit("app-exit-request", ());
-        }
+        // 与 Alt+F4 / 任务栏关闭同路径：JS 活着就交给它提交编辑再退（见 request_exit）
+        TRAY_QUIT => request_exit(app),
         _ => {}
     }
+}
+
+// 「JS 还活着吗」：boot 跑完过，且最近一次心跳没超时。两个条件缺一不可——
+// 白屏时 js_ready 可能还是 true，但心跳早停了，这时不能再等它。
+fn js_is_alive(js_ready: bool, since_beat: Duration) -> bool {
+    js_ready && since_beat < EXIT_GRACE
+}
+
+// 退出：JS 活着 → 让它提交编辑、写盘、调 exit_app；JS 死了/不答 → 直接退。
+// 白屏那次「托盘里退出不了」的根因是整条退出链都挂在 JS 监听上（ADR 0008）。
+fn request_exit(app: &AppHandle) {
+    let js_alive = {
+        let state = app.state::<Mutex<Shared>>();
+        let mut s = state.lock().unwrap();
+        if s.exiting {
+            return;
+        }
+        s.exiting = true;
+        let alive = js_is_alive(s.js_ready, s.last_beat.elapsed());
+        s.log(&format!("exit request (js alive = {})", alive));
+        alive
+    };
+    write_config(app);
+    if js_alive {
+        let _ = app.emit("app-exit-request", ());
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(EXIT_GRACE);
+            force_exit(&app, "js did not answer exit request");
+        });
+    } else {
+        force_exit(app, "webview is not answering");
+    }
+}
+
+// 真正退出：先走正常路径（事件循环返回 → main 结束），再不济直接结束进程。
+// 主线程若卡在某个 Win32 调用里，app.exit(0) 只会排队等不到，所以必须有后手。
+fn force_exit(app: &AppHandle, why: &str) {
+    write_config(app);
+    app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("force exit: {}", why));
+    app.exit(0);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(EXIT_GRACE);
+        app.state::<Mutex<Shared>>().lock().unwrap().log("force exit: event loop still alive, terminating process");
+        std::process::exit(0);
+    });
 }
 
 #[tauri::command]
@@ -731,12 +804,162 @@ fn log_line(app: AppHandle, msg: String) {
     app.state::<Mutex<Shared>>().lock().unwrap().log(&msg);
 }
 
+// 每秒一次的心跳：看门狗据此判断界面还活着（ADR 0008）。
+// JS 在模块顶层就开定时器，只要脚本执行到就发——boot 卡在半路也还有心跳，不会被误 reload。
+#[tauri::command]
+fn heartbeat(app: AppHandle, ready: Option<bool>) {
+    let state = app.state::<Mutex<Shared>>();
+    let mut s = state.lock().unwrap();
+    s.last_beat = Instant::now();
+    if ready == Some(true) && !s.js_ready {
+        s.js_ready = true;
+        s.shown_at = Instant::now();
+        let _ = std::fs::remove_file(&s.restart_marker);
+        s.log("ui ready (boot finished)");
+    }
+}
+
 // JS 先提交编辑、写盘，再调这里：保存 config 后整体退出（对齐 todo.pyw on_close 收尾）
 #[tauri::command]
 fn exit_app(app: AppHandle) {
     write_config(&app);
     app.state::<Mutex<Shared>>().lock().unwrap().log("exit");
     app.exit(0);
+}
+
+// 看门狗这一秒要做什么（锁内决定，锁外执行）
+enum WatchdogAction {
+    Reload(u32),
+    GiveUp { restart: bool },
+}
+
+// 判定本身不带状态，单独拆出来测（ADR 0008 的核心策略）。
+enum WatchdogStep {
+    Idle,
+    Reload,
+    GiveUp { restart: bool },
+}
+
+// silent 超限才动手；reload 次数没到上限就再试一次；到顶了：
+// 允许重启就重启（只允许一次，重启后还白屏说明环境本身坏了），否则彻底撒手——
+// 撒手不影响退出，退出有 request_exit 兜底。
+fn watchdog_step(silent: Duration, limit: Duration, reloads: u32, gave_up: bool, can_restart: bool) -> WatchdogStep {
+    if silent <= limit {
+        return WatchdogStep::Idle;
+    }
+    if reloads >= WATCHDOG_MAX_RELOADS {
+        if gave_up {
+            return WatchdogStep::Idle;
+        }
+        return WatchdogStep::GiveUp { restart: can_restart };
+    }
+    WatchdogStep::Reload
+}
+
+// 界面存活看门狗（ADR 0008）：每秒看一眼「页面是否加载过 / JS 心跳还在不在」。
+// 先 reload 自救，救不回来（实测：WebView2 浏览器进程被杀后 reload 返回成功但页面永不回来）
+// 就重启自己一把——那正是用户「双击重开」要做的事，而老版本连退都退不掉，重开无从谈起。
+fn spawn_watchdog(app: AppHandle, win: WebviewWindow) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(1000));
+        let action = {
+            let state = app.state::<Mutex<Shared>>();
+            let mut s = state.lock().unwrap();
+            if s.exiting {
+                continue;
+            }
+            // 没加载完 / JS 没起来：从 show（或 boot 成功）算起；起来了：只看心跳间隔
+            let (silent, limit) = if s.js_ready {
+                (s.last_beat.elapsed(), WATCHDOG_BEAT_LIMIT)
+            } else {
+                (s.shown_at.elapsed(), WATCHDOG_LOAD_LIMIT)
+            };
+            match watchdog_step(silent, limit, s.reloads, s.gave_up, s.can_restart) {
+                WatchdogStep::Idle => continue,
+                WatchdogStep::GiveUp { restart } => {
+                    s.gave_up = true;
+                    s.log(&format!(
+                        "watchdog: ui silent {}s, {} reloads did not help",
+                        silent.as_secs(),
+                        s.reloads
+                    ));
+                    WatchdogAction::GiveUp { restart }
+                }
+                WatchdogStep::Reload => {
+                    s.reloads += 1;
+                    let n = s.reloads;
+                    let loaded = s.page_loaded;
+                    s.page_loaded = false;
+                    s.js_ready = false;
+                    s.shown_at = Instant::now();
+                    s.last_beat = Instant::now();
+                    s.log(&format!(
+                        "watchdog: ui silent {}s (page loaded = {}) -> reload #{}",
+                        silent.as_secs(),
+                        loaded,
+                        n
+                    ));
+                    WatchdogAction::Reload(n)
+                }
+            }
+        };
+        match action {
+            WatchdogAction::Reload(n) => {
+                if let Err(e) = win.reload() {
+                    app.state::<Mutex<Shared>>()
+                        .lock()
+                        .unwrap()
+                        .log(&format!("watchdog: reload #{} failed: {}", n, e));
+                }
+            }
+            WatchdogAction::GiveUp { restart: true } => {
+                restart_self(&app);
+                force_exit(&app, "ui unreachable after reloads, restarted a fresh instance");
+                return;
+            }
+            // 已经自动重启过一次还是白屏 = 环境本身有问题（运行时损坏、udf 坏）。
+            // 不再连环重启，退出仍然可用，留给用户自己决定重开还是修环境。
+            WatchdogAction::GiveUp { restart: false } => return,
+        }
+    });
+}
+
+// 拉起一个新实例：新实例带 --wait-mutex，自己等老进程放出单实例锁再接管。
+// CREATE_NO_WINDOW + DETACHED_PROCESS：不闪黑框，也不随本进程一起死。
+fn restart_self(app: &AppHandle) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            app.state::<Mutex<Shared>>()
+                .lock()
+                .unwrap()
+                .log(&format!("restart: cannot resolve exe path: {}", e));
+            return;
+        }
+    };
+    {
+        let state = app.state::<Mutex<Shared>>();
+        let s = state.lock().unwrap();
+        // 重启标记：新实例启动时看到它就只再试一次自救、不再连环重启（见 can_restart）
+        let _ = std::fs::write(&s.restart_marker, "1");
+        s.log(&format!("restart: spawning {}", exe.display()));
+    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    // 直接拉新实例并带上 --wait-mutex：它自己等老进程放出单实例锁再接管。
+    // （不要绕 cmd.exe /C + start：Rust 给 cmd 加引号的规则和 cmd 自己的解析撞车，
+    //   实测那样一条命令根本没被解析成 start，静默失败。）
+    if let Err(e) = std::process::Command::new(&exe)
+        .arg(RESTART_ARG)
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn()
+    {
+        app.state::<Mutex<Shared>>()
+            .lock()
+            .unwrap()
+            .log(&format!("restart: spawn failed: {}", e));
+    }
 }
 
 // ---------------- 启动 ----------------
@@ -746,7 +969,9 @@ fn main() {
 
     // argv：[1]=md 路径 → 测试运行；[2]="float" 或 "x,y"（物理像素）
     // （对齐 todo.pyw：argv[2]=="float" 悬浮置顶测试；"x,y" 指定桌面位置）
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // --wait-mutex 是本程序自动重启时给自己的参数，不算用户传入，先滤掉。
+    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != RESTART_ARG).collect();
+    let wait_for_mutex = std::env::args().any(|a| a == RESTART_ARG);
     let testing = !args.is_empty();
     let mut want_dock = true;
     let mut test_pos: Option<(i32, i32)> = None;
@@ -779,19 +1004,56 @@ fn main() {
     // 老 config 里写着 docked=true 的继续固定在桌面，不迁移。
     let initial_dock = if testing { want_dock } else { cfg.docked.unwrap_or(false) };
 
-    let log_path = testing.then(|| file.parent().unwrap_or(&app_dir).join("widget.log"));
-
-    // 单实例保护（启动器可能留下 183 的 last error，先清零再建互斥体）
-    let name = wide(MUTEX_NAME);
-    unsafe {
-        SetLastError(0);
-        CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        if GetLastError() == 183 {
-            // ERROR_ALREADY_EXISTS
-            std::process::exit(0);
+    // 日志常开（ADR 0008）：白屏那次一点痕迹都没留下，事后只能靠猜。
+    // 测试运行写 md 旁边（与原行为一致），正式运行写 exe 旁 widget.log。
+    let log_path = Some(if testing {
+        file.parent().unwrap_or(&app_dir).join("widget.log")
+    } else {
+        app_dir.join("widget.log")
+    });
+    // 长跑日志封顶：启动时超过 200KB 就清空，只留本次运行
+    if let Some(p) = &log_path {
+        if std::fs::metadata(p).map(|m| m.len() > 200_000).unwrap_or(false) {
+            let _ = std::fs::write(p, "");
         }
     }
 
+    // 单实例保护：独占文件锁（share=0），不是命名互斥体。
+    // 2026-11-13 实测：WebView2 启动浏览器进程时开了句柄继承，孤儿 msedgewebview2 子进程会
+    // 把命名互斥体一起继承着，老进程退出后名字对象仍然活着 —— 自动重启的新实例要等 8 秒、
+    // 然后静默自杀。文件句柄不可继承，进程一退内核就放锁，子进程继承不到。
+    // 句柄故意不关闭：整个进程生命周期都要持有它（进程退出时内核自动释放）。
+    // 自动重启拉起的新实例带 --wait-mutex：老进程要退几百毫秒才放锁，它最多等 8 秒。
+    let lock_path = wide(&app_dir.join("widget.lock").to_string_lossy());
+    {
+        let mut tries = if wait_for_mutex { 80 } else { 1 };   // 80 × 100ms
+        loop {
+            let handle = unsafe {
+                CreateFileW(
+                    lock_path.as_ptr(),
+                    0x4000_0000,   // GENERIC_WRITE
+                    0,             // share = 0：独占
+                    std::ptr::null(),
+                    4,             // OPEN_ALWAYS：没有就建
+                    0x80,          // FILE_ATTRIBUTE_NORMAL
+                    0,
+                )
+            };
+            if handle != -1 {
+                break;   // 拿到锁
+            }
+            tries -= 1;
+            if tries == 0 {
+                std::process::exit(0);   // 已有实例在跑
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    let boot = Instant::now();
+    // 上一轮自动重启留下的标记：还在说明「重启后仍然白屏」，这次不再连环重启
+    let restart_marker = app_dir.join("widget.restart");
+    let can_restart = !restart_marker.exists();
     let managed = Mutex::new(Shared {
         exe_dir: app_dir.clone(),
         file,
@@ -800,6 +1062,15 @@ fn main() {
         ro_warned: false,
         dirty_config: false,
         log_path,
+        shown_at: boot,
+        page_loaded: false,
+        last_beat: boot,
+        js_ready: false,
+        reloads: 0,
+        exiting: false,
+        gave_up: false,
+        can_restart,
+        restart_marker,
     });
 
     tauri::Builder::default()
@@ -808,8 +1079,22 @@ fn main() {
             app_info, read_md, write_md, file_state, save_config, set_docked,
             resize_start, poll_tick,
             panel_open, panel_close, choose_file, new_md_file, open_file_location,
-            log_line, exit_app
+            log_line, heartbeat, exit_app
         ])
+        // 页面加载完成 = 白屏自救的第二个信号源（心跳之外的硬证据，ADR 0008）
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let app = webview.app_handle();
+                let state = app.state::<Mutex<Shared>>();
+                let mut s = state.lock().unwrap();
+                s.page_loaded = true;
+                s.last_beat = Instant::now();
+                s.shown_at = Instant::now();
+                // 页面真的回来了：清掉重启标记，下次白屏还能自救
+                let _ = std::fs::remove_file(&s.restart_marker);
+                s.log("page load finished");
+            }
+        })
         .setup(move |app| {
             // UDF：exe 旁的 udf/（绿色便携语义，与 config.json 同址；
             // loader 对显式 UDF 要求目录可创建，失败会清掉新建目录 —— 见 spike 报告 §3.1）
@@ -836,7 +1121,20 @@ fn main() {
             } else {
                 win
             };
-            let win = win.additional_browser_args(BROWSER_ARGS).build()?;
+            // build 失败 = WebView2 环境建不起来（udf 被占用 / 运行时损坏）。以前这里 `?`
+            // 让 setup 返回 Err → tauri panic，进程悄悄死掉，用户看到的是「双击没反应」。
+            // 改成把原因写进日志并弹框说明（ADR 0008）。
+            let win = match win.additional_browser_args(BROWSER_ARGS).build() {
+                Ok(w) => w,
+                Err(e) => {
+                    app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("webview build failed: {}", e));
+                    show_message_box(
+                        "error",
+                        &format!("界面起不来（WebView2 运行时可能被占用或损坏）：\n{}\n\n请先确认没有正在运行的实例，或重启电脑后再试。", e),
+                    );
+                    std::process::exit(1);
+                }
+            };
             win.hide()?;
 
             // 尺寸/位置：config 存物理像素（与 Tk PMv2 下 winfo 坐标 1:1）
@@ -883,6 +1181,7 @@ fn main() {
             let mode = if initial_dock { "desktop mode" } else { "normal window" };
             app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("{}: hwnd={}", mode, hwnd));
             win.show()?;
+            app.state::<Mutex<Shared>>().lock().unwrap().shown_at = Instant::now();
             // 首次 ShowWindow 会按建窗时的样式重算 exstyle，显示前落的 TOOLWINDOW/APPWINDOW 会被抹掉
             // （实测：显示前设的被覆盖，显示后设的稳定），所以显示后必须再落一次。
             apply_docked(&win, initial_dock);
@@ -947,12 +1246,25 @@ fn main() {
             } else {
                 panel
             };
-            let panel = panel.additional_browser_args(BROWSER_ARGS).build()?;
-            panel.hide()?;
-            if let Some(h) = win_hwnd(&panel) {
-                set_ex_flags(h, true);
+            let panel = panel.additional_browser_args(BROWSER_ARGS).build();
+            // 面板只是详情窗：它起不来不该拖垮主窗（白屏自救同理，ADR 0008）
+            match panel {
+                Ok(panel) => {
+                    panel.hide()?;
+                    if let Some(h) = win_hwnd(&panel) {
+                        set_ex_flags(h, true);
+                    }
+                    let _ = panel.set_always_on_top(true);
+                }
+                Err(e) => app
+                    .state::<Mutex<Shared>>()
+                    .lock()
+                    .unwrap()
+                    .log(&format!("panel build failed: {}（详情面板不可用，主窗照常）", e)),
             }
-            let _ = panel.set_always_on_top(true);
+
+            // 看门狗最后起：此时窗口已 show、页面开始加载，计时才有意义
+            spawn_watchdog(app.handle().clone(), win.clone());
 
             Ok(())
         })
@@ -974,9 +1286,10 @@ fn main() {
             WindowEvent::CloseRequested { api, .. } => {
                 let app = win.app_handle();
                 if win.label() == "main" {
-                    // 任务栏右键关闭 / Alt+F4：交给 JS 走 on_close 语义（提交编辑→保存→退出）
+                    // 任务栏右键关闭 / Alt+F4：JS 活着就交给它走 on_close 语义（提交编辑→保存→退出），
+                    // JS 死了就直接退——退出这件事不能整个挂在 webview 上（ADR 0008）
                     api.prevent_close();
-                    let _ = app.emit("app-exit-request", ());
+                    request_exit(app);
                 } else {
                     // 面板被外部关闭（Alt+F4）：与面板内 ✕ 同路径
                     api.prevent_close();
@@ -1017,5 +1330,48 @@ mod dock_style_tests {
         // 用户 2026-11-13 定稿：置顶功能整体下线，两种模式都不许 topmost
         assert!(!dock_style(true).always_on_top);
         assert!(!dock_style(false).always_on_top);
+    }
+
+    // ADR 0008：2026-11-13 白屏事故。「托盘退出不了」的根因是退出链全挂在 JS 上，
+    // 而白屏时 JS 已经死了 —— 所以判定必须能识破「曾经就绪、现在没心跳」。
+    #[test]
+    fn js_counts_as_alive_only_when_booted_and_beating() {
+        assert!(js_is_alive(true, Duration::from_millis(500)), "boot 完成 + 心跳新鲜 = 可以等它提交编辑");
+        assert!(!js_is_alive(true, Duration::from_secs(60)), "心跳停了（白屏）不能再等，必须直接退");
+        assert!(!js_is_alive(false, Duration::from_millis(500)), "boot 没跑完就没有退出监听，等也没用");
+        assert!(!js_is_alive(false, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn exit_grace_is_short_enough_to_still_feel_like_quitting() {
+        // 等 JS 再兜底的总时长必须明显短于「用户以为点了没反应」的耐心阈值
+        assert!(EXIT_GRACE <= Duration::from_secs(3), "兜底等待超过 3 秒就会被当成卡死");
+        assert!(EXIT_GRACE >= Duration::from_millis(500), "太快则正常的写盘 + 退出流程会被腰斩");
+    }
+
+    // 白屏自救的判定表：事件里最贵的是「每 20 秒才动一次手」和「无限重启」，两条都要钉住。
+    #[test]
+    fn watchdog_reloads_before_giving_up() {
+        let limit = Duration::from_secs(20);
+        assert!(matches!(watchdog_step(Duration::from_secs(5), limit, 0, false, true), WatchdogStep::Idle));
+        assert!(matches!(
+            watchdog_step(Duration::from_secs(21), limit, 0, false, true),
+            WatchdogStep::Reload
+        ));
+        // reload 用满上限 → 该重启了（这正是 2026-11-13 现场：浏览器进程死了，reload 救不回来）
+        assert!(matches!(
+            watchdog_step(Duration::from_secs(21), limit, WATCHDOG_MAX_RELOADS, false, true),
+            WatchdogStep::GiveUp { restart: true }
+        ));
+        // 重启过一次还是白屏 → 不再连环重启
+        assert!(matches!(
+            watchdog_step(Duration::from_secs(21), limit, WATCHDOG_MAX_RELOADS, false, false),
+            WatchdogStep::GiveUp { restart: false }
+        ));
+        // 已经撒手就不再重复记录
+        assert!(matches!(
+            watchdog_step(Duration::from_secs(999), limit, WATCHDOG_MAX_RELOADS, true, true),
+            WatchdogStep::Idle
+        ));
     }
 }

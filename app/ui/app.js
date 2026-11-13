@@ -55,7 +55,13 @@ const S = {
   quitting: false,
 };
 
+/* 界面心跳（ADR 0008）：Rust 侧看门狗靠它判断界面还活着，白屏就自动 reload 自救。
+   定时器在模块顶层就开——boot 卡住也还在发，只有页面/进程真死才会断。 */
+let uiReady = false;
+setInterval(() => { invoke('heartbeat', { ready: uiReady }).catch(() => {}); }, 1000);
+
 const ROWS = new Map();  // i -> { row, label, box }
+
 const VIS = [];          // 可拖行（分组标题 / 待办）按文档顺序：[{ i, el }]
 
 /* 拖动排序状态（0.4.0）：pointer 自绘，不用 HTML5 DnD（WebView2 里不可靠）。 */
@@ -1270,6 +1276,8 @@ function bindChrome() {
 /* ---------- 启动 ---------- */
 
 async function boot() {
+  // 先挂退出监听：后面任何一步抛错（后端命令失败、文件读不了）都不该连带把「退出」弄死（ADR 0008）
+  await window.__TAURI__.event.listen('app-exit-request', () => exitApp());
   const info = await invoke('app_info');
   S.file = info.file;
   S.docked = info.docked !== undefined ? !!info.docked : false;
@@ -1278,7 +1286,6 @@ async function boot() {
 
   bindChrome();
   await window.__TAURI__.event.listen('panel-req', panelReqHandler);
-  await window.__TAURI__.event.listen('app-exit-request', () => exitApp());
   await window.__TAURI__.event.listen('dock-changed', (e) => {
     // 托盘菜单切模式时由 Rust 广播：按状态重算，别信本地翻转
     S.docked = !!e.payload;
@@ -1299,6 +1306,9 @@ async function boot() {
 
   await loadFile();
   pollTick();   // Tk 启动时先跑一轮 poll 再进入循环
+  // boot 走完 = 界面真起来了：告诉 Rust 看门狗别再按「加载超时」倒计时（ADR 0008）
+  uiReady = true;
+  invoke('heartbeat', { ready: true }).catch(() => {});
 }
 
 boot().catch((e) => log(`boot error: ${e}`));
