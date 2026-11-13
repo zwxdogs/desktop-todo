@@ -79,3 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 - 构建：Rust stable（cargo）
 - 测试：Node.js（`node --test`）
 - 回退：Tk 0.2.7 的源码已从仓库删除（见 [ADR 0006](docs/adr/0006-remove-tk-fallback.md)），需要时从 git 历史取；只想要可运行的老版本就用 Releases 里的 Tk 版（最后发布的是 `DesktopTodo-0.2.4-win64.zip`）
+
+## 许可
+
+本项目采用 [MIT 许可证](LICENSE)，版权归 zwxdogs 所有。可以随意使用、修改、分发和商用，保留版权声明与许可声明即可。

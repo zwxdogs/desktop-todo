@@ -3,6 +3,7 @@ name = "desktop-todo"
 version = "0.4.1"
 edition = "2021"
 description = "桌面待办 —— Markdown 待办清单固定在 Windows 桌面（Tauri 2）"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
