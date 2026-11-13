@@ -10,6 +10,7 @@ import * as md from './md.js';
 import { createUndoStack } from './undo.js';
 import { starterText, missingHint } from './starter.js';
 import { attachScrollbar } from './scrollbar.js';
+import { plusButton } from './plus.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -281,20 +282,34 @@ function renderList(focusIdx) {
   ROWS.clear();
   VIS.length = 0;
   let i = 0;
+  let shown = 0;                       // 真的画出来的行数（空行不算）——0 就是空清单
   while (i < S.lines.length) {
     const ln = S.lines[i];
     // 0.4.0：备注只在详情面板里出现；顶格备注行静默隐藏但原样留在文件里。
     if (ln.kind === 'note') { i += 1; continue; }
     buildRow(i, ln);
+    if (ln.kind !== 'blank') shown += 1;
     if (ln.kind === 'todo') {
       i = md.subtreeEnd(S.lines, i);   // 待办的整个子块收进详情面板
     } else {
       i += 1;
     }
   }
+  // 空清单上没有任何行可以悬停，加号无从发现：用一句灰字把第一步（加分组）指出来。
+  if (!shown && S.loaded) addEmptyHint();
   sc.scrollTop = frac * (sc.scrollHeight - sc.clientHeight);
   if (mainScroll) mainScroll.refresh();  // 行数变了：拇指长度要重算（静默，不闪）
   refreshPanel(focusIdx);              // 主列表是清单渲染的唯一出口
+}
+
+function addEmptyHint() {
+  const hint = document.createElement('div');
+  hint.className = 'empty-hint';
+  hint.textContent = '右键空白处，添加分组';
+  // 只有空行的清单里，上面的 .gap 已经把灰字往下挤了；扣回那段高度，让它在离顶 44px 处
+  const gaps = S.lines.reduce((n, ln) => n + (ln.kind === 'blank' ? 1 : 0), 0);
+  hint.style.marginTop = `${Math.max(8, 44 - gaps * 8)}px`;
+  listEl.appendChild(hint);
 }
 
 function buildRow(i, ln) {
@@ -358,6 +373,7 @@ function buildRow(i, ln) {
   ROWS.set(i, info);
   if (ln.kind === 'header' || ln.kind === 'todo') {
     addHandle(row, i);                     // 0.4.0：拖动把手只在可拖的行上
+    addPlus(row, i);                       // ADR 0007：加号同理只挂在能插待办的行上
     VIS.push({ i, el: row });
   }
 }
@@ -399,11 +415,12 @@ function editRow(i) {
   input.className = 'row-edit' + (ln.checked ? ' done' : '');
   input.value = ln.text;
   info.label.style.display = 'none';
+  info.row.classList.add('editing');   // 编辑中把加号和把手收起来（CSS 只管显隐）
   info.row.insertBefore(input, info.label.nextSibling);
   input.select();
   input.focus();
 
-  const entry = { index: i, input };
+  const entry = { index: i, input, row: info.row };
   S.edit = entry;
 
   input.addEventListener('keydown', (e) => {
@@ -415,12 +432,20 @@ function editRow(i) {
   input.addEventListener('compositionend', () => input.focus());
 }
 
+/* 编辑框收拾干净：清状态、拆输入框、撤掉这一行的 editing 标记 */
+function dropEditor(entry) {
+  if (!entry) return;
+  S.edit = null;
+  if (entry.input) entry.input.remove();
+  if (entry.row) entry.row.classList.remove('editing');
+}
+
 /* 编辑框提交（todo.pyw:854-864）：值不做 trim，空文本照写 */
 function commitEdit() {
   if (!S.edit) return;
-  const { index, input } = S.edit;
-  S.edit = null;
-  input.remove();
+  const entry = S.edit;
+  const { index, input } = entry;
+  dropEditor(entry);
   if (!(index >= 0 && index < S.lines.length)) { renderList(); return; }
   pushUndo();
   md.setLineText(S.lines[index], input.value);
@@ -431,17 +456,16 @@ function commitEdit() {
 
 function cancelEdit() {
   if (!S.edit) return;
-  const { input } = S.edit;
-  S.edit = null;
-  input.remove();
+  dropEditor(S.edit);
   renderList();
 }
 
 /* 静默提交不重渲染（todo.pyw:879-890 close_editor） */
 function closeEditor() {
   if (!S.edit) return;
-  const { index, input } = S.edit;
-  S.edit = null;
+  const entry = S.edit;
+  const { index, input } = entry;
+  dropEditor(entry);
   if (index >= 0 && index < S.lines.length) {
     try {
       pushUndo();
@@ -455,9 +479,7 @@ function closeEditor() {
 /* 正在编辑的行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964） */
 function discardEditor() {
   if (!S.edit) return;
-  const { input } = S.edit;
-  S.edit = null;
-  input.remove();
+  dropEditor(S.edit);
 }
 
 function panelSyncAnchor(i) {
@@ -475,6 +497,9 @@ document.addEventListener('mousedown', (e) => {
   const editing = S.edit || S.panelEditing;
   if (!editing) return;
   if (e.target && e.target.closest && e.target.closest('input')) return;
+  // 加号自己会把正在编辑的那行提交掉（insertLine → renderList → closeEditor）：
+  // 这里若也排一次提交，重画会把这个按钮换掉，click 就落不到它身上（ADR 0007）。
+  if (e.target && e.target.closest && e.target.closest('.plus-add')) return;
   setTimeout(() => {
     if (S.edit) commitEdit();
     if (S.panelEditing) emitTo('panel', 'panel-commit', {});
@@ -518,17 +543,6 @@ async function deleteLine(i) {
   scheduleSave();
 }
 
-async function addTodoEnd() {
-  // todo.pyw:969-978。0.4.0 起没有文件时不再"就地建一个只有一条待办的文件"：
-  // 新建文件只走顶栏 ＋（会带示例内容），这里没装载成功的清单一律不写。
-  if (S.missingShown || !S.loaded) return;
-  if (!S.lines.length) {
-    insertLine(-1, 'todo', '', '新待办');
-    return;
-  }
-  insertLine(S.lines.length - 1, 'todo', '', '新待办');
-}
-
 function groupBlockEnd(i) {
   // todo.pyw:981-986；0.4.0 起与拖动排序共用同一个行块定义
   return md.blockEnd(S.lines, i);
@@ -547,13 +561,26 @@ function insertGroup(i) {
   setTimeout(() => editRow(pos), 30);
 }
 
-function nextTodoIndent(i) {
-  // todo.pyw:1454-1461
-  for (let j = i + 1; j < S.lines.length; j += 1) {
-    if (S.lines[j].kind === 'todo') return S.lines[j].indent;
-    if (S.lines[j].kind === 'header' || S.lines[j].kind === 'blank') break;
-  }
-  return '';
+/* ---------- 行内加号（ADR 0007） ----------
+   悬停在分组标题/待办上时，把手左边出现一个小加号；点它在条目下方插一条待办。
+   落点由 md.todoBelow 算：分组标题跟组内第一条待办的缩进，待办插在整块之后不抢子项。 */
+
+function addPlus(row, i) {
+  const p = plusButton('在下方添加待办');
+  p.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const slot = md.todoBelow(S.lines, i);
+    if (slot) insertLine(slot.after, 'todo', slot.indent, '新待办');
+  });
+  // 加号上的右键仍然是这一行的菜单（与右键行本体一致）
+  p.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (DND.on) { cleanupDrag(); return; }
+    hideMenu();
+    menuRow(i, e.clientX, e.clientY);
+  });
+  row.appendChild(p);
 }
 
 /* ---------- 拖动排序（0.4.0） ----------
@@ -816,9 +843,14 @@ function showMenu(items, x, y) {
       continue;
     }
     const el = document.createElement('div');
-    el.className = 'menu-item';
+    el.className = 'menu-item' + (it.disabled ? ' disabled' : '');
     el.textContent = it.label;
-    el.addEventListener('click', () => { hideMenu(); it.fn(); });
+    if (it.disabled) {
+      // 置灰项只是个占位说明：点了不动作，菜单也不关（ADR 0007）
+      el.addEventListener('click', (e) => { e.stopPropagation(); });
+    } else {
+      el.addEventListener('click', () => { hideMenu(); it.fn(); });
+    }
     menuEl.appendChild(el);
   }
   menuEl.style.display = 'block';
@@ -834,40 +866,32 @@ function hideMenu() { menuEl.style.display = 'none'; }
 function menuRow(i, x, y) {
   const ln = S.lines[i];
   const items = [];
+  // ADR 0007：添加待办从菜单搬到行上的加号，这里只剩改结构/改名/改文字/删除。
   if (ln.kind === 'header') {
-    items.push({ label: '在此分组添加待办', fn: () => insertLine(i, 'todo', nextTodoIndent(i), '新待办') });
     items.push({ label: '在下方插入分组', fn: () => insertGroup(i) });
     items.push({ label: '重命名分组', fn: () => editRow(i) });
     items.push({ label: '删除分组标题', fn: () => deleteLine(i) });
   } else if (ln.kind === 'todo') {
-    items.push({ label: '在下方插入待办', fn: () => insertLine(i, 'todo', ln.indent, '新待办', { pos: md.subtreeEnd(S.lines, i) - 1 }) });
     items.push({ label: '打开详情面板', fn: () => openPanel(i) });
     items.push({ label: '在下方插入分组', fn: () => insertGroup(i) });
     items.push('sep');
     items.push({ label: '编辑', fn: () => editRow(i) });
     items.push({ label: '删除', fn: () => deleteLine(i) });
-  } else if (ln.kind === 'note') {
-    items.push({ label: '在下方插入注释', fn: () => insertLine(i, 'note', ln.indent, '') });
-    items.push({ label: '在下方插入分组', fn: () => insertGroup(i) });
-    items.push({ label: '编辑', fn: () => editRow(i) });
-    items.push({ label: '删除', fn: () => deleteLine(i) });
   } else {
+    // blank / other / note：主窗口不给它们开菜单（备注只活在详情面板里，见 renderList 的跳过）
     return;
   }
   showMenu(items, x, y);
 }
 
 function menuBlank(x, y) {
-  const items = [];
-  // 文件缺失时没有可写的目标：加待办/加分组会让 addTodoEnd 隐式建一个只有一条待办的文件，
-  // 绕过 ＋ 的示例内容。此时只留「退出」，新建文件走顶栏 ＋ 这一条路。
-  if (!S.missingShown) {
-    items.push({ label: '在末尾添加待办', fn: addTodoEnd });
-    items.push({ label: '在末尾添加分组', fn: () => insertGroup(S.lines.length - 1) });
-    items.push('sep');
-  }
-  items.push({ label: '退出', fn: exitApp });
-  showMenu(items, x, y);
+  // 空白处只剩这一项；退出交给顶栏的 ✕。文件缺失时没有可写的目标（加了会隐式建一个
+  // 只有分组的新文件，绕过 ＋ 的示例内容），所以这一项置灰说明，而不是消失。
+  showMenu([{
+    label: '在末尾添加分组',
+    disabled: S.missingShown || !S.loaded,
+    fn: () => insertGroup(S.lines.length - 1),
+  }], x, y);
 }
 
 /* 原“右键标题栏”菜单（更换文件… / 打开文件位置 / 退出）已整块删除，前两项改由顶栏常驻图标接管
@@ -989,6 +1013,10 @@ function panelReqHandler(ev) {
     case 'add-note':
       pAddNote();
       break;
+    case 'add-below':
+      // ADR 0007：面板行上的加号——在该行下方插一条同类条目（缩进原样抄这一行）
+      pAddBelow(d.kind, d.j);
+      break;
     case 'move': {
       // 0.4.0：面板里拖动排序（只在同一栏内，跨栏不合法）。真搬行只在这里做。
       const to = d.where === 'before' ? d.anchor : md.blockEnd(S.lines, d.anchor);
@@ -1030,6 +1058,15 @@ function pAddNote() {
   if (!(i >= 0 && i < S.lines.length)) return;
   const pos = md.subtreeEnd(S.lines, i) - 1;
   insertLine(pos, 'note', md.childIndent(S.lines[i]), '', { inPanel: true });
+}
+
+function pAddBelow(kind, j) {
+  // ADR 0007：面板行上的加号。只挂在这一栏里看得见的行上，缩进原样抄它
+  // （父待办换过缩进也不会串），备注插空文字直接进编辑。
+  // 待办得像主窗口那样落在整棵子块之后：插在 j+1 会把它下面的行抢成自己的孩子。
+  if (!(j >= 0 && j < S.lines.length)) return;
+  const ref = md.subtreeEnd(S.lines, j) - 1;
+  insertLine(ref, kind, S.lines[j].indent, kind === 'todo' ? '新待办' : '', { inPanel: true });
 }
 
 /* ---------- 文件/窗口杂项（todo.pyw:1488-1538） ---------- */

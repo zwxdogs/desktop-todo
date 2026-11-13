@@ -183,6 +183,27 @@ export function childIndent(line) {
   return ' '.repeat(n);
 }
 
+// groupTodoIndent：分组标题下第一条待办的缩进（todo.pyw:1454-1461 的 next_todo_indent）。
+// 扫到第一条待办就抄它的缩进；撞上下一个组头或空行、或者组里根本没有待办，一律顶格。
+export function groupTodoIndent(lines, i) {
+  for (let j = i + 1; j < lines.length; j += 1) {
+    if (lines[j].kind === 'todo') return lines[j].indent;
+    if (lines[j].kind === 'header' || lines[j].kind === 'blank') break;
+  }
+  return '';
+}
+
+// todoBelow：「在条目 i 下方插一条待办」的落点，直接喂 insertLine(after, 'todo', indent, ...)。
+// 分组标题插在标题本身之后、缩进跟组内第一条待办；待办插在整棵子块之后（不抢子项）。
+// 备注/普通段落/空行不挂加号，返回 null。
+export function todoBelow(lines, i) {
+  const ln = lines[i];
+  if (!ln) return null;
+  if (ln.kind === 'header') return { after: i, indent: groupTodoIndent(lines, i) };
+  if (ln.kind === 'todo') return { after: subtreeEnd(lines, i) - 1, indent: ln.indent };
+  return null;
+}
+
 // panelParts：详情面板两栏 (子待办下标, 备注下标)，按文件原顺序；空行不进。
 export function panelParts(lines, i) {
   const end = subtreeEnd(lines, i);

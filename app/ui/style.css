@@ -118,7 +118,7 @@ body {
   font-size: 11pt;
   font-weight: bold;
   color: #3D76B5;
-  padding: 8px 40px 4px var(--pad, 0px);
+  padding: 8px 62px 4px var(--pad, 0px);
 }
 
 /* 勾选框 18：SVG viewBox 0 0 18 18 随尺寸缩放，坐标=物理格（s 单位） */
@@ -134,7 +134,7 @@ body {
 .row .label {
   flex: 1;
   min-width: 0;
-  padding: 0 42px 0 0;        /* Tk wraplength 右侧 30 预留 + label 右边距 12 */
+  padding: 0 64px 0 0;        /* 文字避开右侧的徽标、加号与把手（ADR 0007：加号占了 22~40px） */
   line-height: 22px;          /* 2 + 11 = 13，与勾选框/徽标 13 对齐 */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -208,9 +208,33 @@ body {
 .row:hover .drag-handle { opacity: 1; }
 .row-header .drag-handle { top: 7px; right: 8px; }
 
-/* 悬停让位：徽标左移 20px（transform 不重排文字），把手正好落在让出的位置 */
+/* 行内加号（ADR 0007）：把手左边的 18px 命中区，悬停行才现身 */
+.plus-add {
+  position: absolute;
+  top: 3px;
+  right: 22px;
+  width: 18px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #B4BCC6;
+  opacity: 0;
+  transition: opacity .12s;
+  cursor: pointer;
+}
+.plus-add svg { width: 12px; height: 12px; display: block; }
+.plus-add:hover { color: #4A8FE2; }
+.row:hover .plus-add { opacity: 1; }
+.row-header .plus-add { top: 7px; right: 28px; }
+/* 编辑中这一行露着加号/把手只会挡字；拖动中整页的加号也别抢指针 */
+.row.editing .plus-add,
+.row.editing .drag-handle { display: none; }
+body.dragging .plus-add { display: none; }
+
+/* 悬停让位：徽标左移 40px（transform 不重排文字），让出的位置刚好放下加号与把手 */
 .badge { transition: transform .12s; }
-.row:hover .badge { transform: translateX(-20px); }
+.row:hover .badge { transform: translateX(-40px); }
 
 /* 拖起：原位留一块虚线占位（不重排） */
 .row.drag-src {
@@ -316,6 +340,19 @@ body.dragging .row:hover .badge { transform: none; }
   overflow-wrap: anywhere;
 }
 
+/* ---------- 空清单占位（ADR 0007） ---------- */
+/* 空清单上一个可悬停的行都没有，加号无从发现：一句灰字把第一步（加分组）指出来。
+   pointer-events:none 让右键照样落到 #list 自己身上，弹出的还是空白菜单。 */
+.empty-hint {
+  margin: 0 auto;   /* 离顶距离由 addEmptyHint 现算（上方可能还有空行的 8px） */
+  max-width: 260px;
+  padding: 0 16px;
+  text-align: center;
+  color: #8B929B;
+  font-size: 10pt;
+  pointer-events: none;
+}
+
 /* ---------- 右键菜单（Tk 原生 tk.Menu 的自绘等效） ---------- */
 #menu {
   position: fixed;
@@ -325,7 +362,7 @@ body.dragging .row:hover .badge { transform: none; }
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
   padding: 4px 0;
-  min-width: 160px;
+  min-width: 120px;   /* 空白菜单只剩一项（ADR 0007），160 会空一大块 */
   display: none;
 }
 .menu-item {
@@ -336,6 +373,11 @@ body.dragging .row:hover .badge { transform: none; }
   white-space: nowrap;
 }
 .menu-item:hover { background: #F2F5F8; }
+.menu-item.disabled {
+  color: #B4BCC6;
+  cursor: default;
+}
+.menu-item.disabled:hover { background: transparent; }
 .menu-sep {
   height: 1px;
   background: #DFE4EA;

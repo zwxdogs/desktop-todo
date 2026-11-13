@@ -16,8 +16,9 @@
 | subtree_stats/panel_parts (189-227) | subtreeStats/panelParts | 等效 |
 | delete_subtree (236-254) | deleteSubtree | 等效 |
 | —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
+| —（0.4.1 新增） | groupTodoIndent / todoBelow | 行内加号的落点与缩进（纯函数，8 项 TDD） |
 
-测试：`node --test app/ui/*.test.js` = **97/97**（md + undo + 新建示例文案 + 滚动条几何，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
+测试：`node --test app/ui/*.test.js` = **106/106**（md + 行内加号落点 + undo + 新建示例文案 + 滚动条几何，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
 
 ## 2. 应用层逐函数对照
 
@@ -30,19 +31,19 @@
 | render_list(605) | app.js renderList（滚动分数保存恢复；0.4.0 起主窗口跳过备注行） | 等效 |
 | build_row(635) | app.js buildRow + style.css（pad=16+min(8u,160)；hover/整行） | 等效 |
 | draw_box(709) | app.js boxSvg（勾/白折线/2px 边） | 等效 |
-| badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移 20px 给拖动把手让位 |
+| badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移给行右缘的加号与把手让位，0.4.1 起让位 40px（§3-14） |
 | 顶栏 hbtn(398-478) | index.html .hbtn ×4 + CSS hover/press/lit | 等效；0.4.0 起另有 2 个 SVG 图标按钮（更换文件 / 打开文件位置，§3-10） |
 | grip(495) | index.html #grip SVG 3 斜线 + hover 变色 | 等效 |
 | edit_row(835) | app.js editRow（Entry→input；不 trim、空照写；Esc/Enter/blur 同语义） | 等效 |
 | toggle_line(827) | app.js（box click → toggle → render → save） | 等效 |
 | insert_line(927) | app.js insertLine（ref=pos??i；nl 补行；30ms 后聚焦新行） | 等效 |
 | delete_line(945) | app.js deleteLine（子块连删；面板命中→关面板） | 等效 |
-| add_todo_end(969) | app.js addTodoEnd（空表插首；否则尾插；文件缺失时不再就地建文件，新建只走 ＋，§3-12） | 等效* |
+| add_todo_end(969) | **已删除**（添加待办改为行右缘的加号，§3-14） | 取消 |
 | group_block_end/insert_group(981-997) | app.js insertGroup（nl 补在 pos-1；插入 pos；30ms 编辑） | 等效 |
 | push_undo/undo(1000-1023) | undo.js + app.js undo（编辑中忽略；栈顶同跳过；cap 50） | 等效 |
 | schedule_save/do_save(1026-1038) | app.js scheduleSave/doSave（250ms 防抖；失败标题「保存失败!」） | 等效 |
-| menu_row(1041) | app.js menuRow（header/todo/note/other 四组菜单项逐项一致） | 等效* |
-| menu_blank/menu_title(1463-1486) | app.js menuBlank；menuTitle **已删除** | menu_blank 等效*；menu_title 取消（0.4.0，改为顶栏常驻图标，§3-10） |
+| menu_row(1041) | app.js menuRow（header/todo 两组：插入分组、重命名/编辑、删除、打开详情面板；blank/other/note 不开菜单） | 偏离（§3-14：不再有"加待办"两项，note 组随主窗口不渲染备注一并删除） |
+| menu_blank/menu_title(1463-1486) | app.js menuBlank；menuTitle **已删除** | menu_blank 偏离（§3-14：只剩「在末尾添加分组」，缺文件时置灰）；menu_title 取消（0.4.0，改为顶栏常驻图标，§3-10） |
 | _panel_locate(1075) | app.js locateAnchor（text+indent_units 锚） | 等效 |
 | open/close_panel(1083/1194) | app.js openPanel/closePanel + Rust panel_open/close（420s×520s、toolwindow、topmost、单实例） | 等效 |
 | render_panel(1225) | app.js pushPanelData → panel.js render（两栏、保滚动、标题同步） | 等效（跨窗事件） |
@@ -51,7 +52,7 @@
 | p_rename(1362) | panel.js pRename（双击标题；Esc 只恢复；Esc 不冒泡） | 等效（跨窗事件） |
 | p_menu(1422) | panel.js pMenu（[编辑, 删除]） | 等效* |
 | p_add_todo/p_add_note(1435/1445) | app.js pAddTodo/pAddNote（pos/child_indent 逐参数一致） | 等效 |
-| _next_todo_indent(1454) | app.js nextTodoIndent | 等效 |
+| _next_todo_indent(1454) | md.groupTodoIndent（纯函数，§3-14） | 搬家 |
 | choose_file(1488) | app.js chooseFile + Rust rfd（initdir/过滤器；path 落 Rust Shared.file） | 等效 |
 | —（0.4.0 新增） | Rust new_md_file + app.js newFile（rfd 另存为：默认名 `待办.md`、默认目录=当前文件父目录或 exe 目录、父目录缺则建；目标已存在→只切换不覆盖；新建时写入 starterText 示例，§3-12） | 新增 |
 | open_file_location(1499) | Rust open_file_location（explorer /select、"路径"；父目录；双不存在弹窗） | 等效 |
@@ -77,10 +78,11 @@
 7. **主窗口不渲染备注（0.4.0）**：备注只在详情面板出现；顶格备注行静默隐藏，文件字节保真、不迁移、不可编辑（用户 m00066/m00070 选定的甲案）。非待办/非备注的其它行（分不清类型的纯文本行）仍按 0.3.0 原样渲染，不隐藏。
 8. **跨窗口拖拽没做（载体限制）**：主窗口↔面板之间不能拖。WebView2 上 HTML5 DnD 跨窗口会被 wry 的 IDropTarget 吃掉（非文件载荷回 DROPEFFECT_NONE，tauri#15138 not planned），pointer 拖拽又跨不了窗口；0.4.0 只做各窗口内的排序。
 9. **测试模式不写 config.json（ADR 0004 期间新增）**：`DesktopTodo.exe <file> <dock|float>` 本来就从不读 config.json，但以前退出时照样把测试文件与测试窗口尺寸写进 exe 同目录的 config.json——跑一次探针就会把用户真实部署的配置改掉（2026-11-13 实测踩到，部署实例一度指向临时测试文件）。现在 testing 分支下 `write_config` 直接返回并记一行 `test mode: config.json not written`。
-10. **标题栏右键菜单取消，改顶栏常驻图标（0.4.0，[#3](https://github.com/zwxdogs/desktop-todo/issues/3)）**：原「右键标题栏 → 更换文件… / 打开文件位置 / 退出」整块删除，前两项改为顶栏两个常驻图标（内联单色 SVG，13px，热区 30×26，tooltip 走 `title`），中间 1px 分组竖线（`pointer-events: none`，穿透后等同点标题栏空白可拖窗）；右键标题栏现在什么也不发生。原因不是审美：Tauri 注入的 `window/scripts/drag.js` 在 document **冒泡**期注册 mousedown，命中 `data-tauri-drag-region` 时 `preventDefault + stopImmediatePropagation + start_dragging`，页面脚本冒泡期注册的"点菜单外面关掉"永远收不到——"菜单弹出后点标题栏关不掉"在该载体下修不好；常驻图标没有开合状态，直接绕开整类问题。退出只剩顶栏 ✕ 与列表空白右键菜单里的「退出」。顺带：最小内宽 260 → 300（顶栏多了两个按钮，260 会把标题挤没），并删掉 `tauri.conf.json` 里主窗口 `create: false` 下不生效的 `minWidth/minHeight`；标题截断时悬停由 `title` 属性给出完整文件名。
+10. **标题栏右键菜单取消，改顶栏常驻图标（0.4.0，[#3](https://github.com/zwxdogs/desktop-todo/issues/3)）**：原「右键标题栏 → 更换文件… / 打开文件位置 / 退出」整块删除，前两项改为顶栏两个常驻图标（内联单色 SVG，13px，热区 30×26，tooltip 走 `title`），中间 1px 分组竖线（`pointer-events: none`，穿透后等同点标题栏空白可拖窗）；右键标题栏现在什么也不发生。原因不是审美：Tauri 注入的 `window/scripts/drag.js` 在 document **冒泡**期注册 mousedown，命中 `data-tauri-drag-region` 时 `preventDefault + stopImmediatePropagation + start_dragging`，页面脚本冒泡期注册的"点菜单外面关掉"永远收不到——"菜单弹出后点标题栏关不掉"在该载体下修不好；常驻图标没有开合状态，直接绕开整类问题。退出只剩顶栏 ✕（列表空白右键菜单里那一项后来也删了，§3-14）。顺带：最小内宽 260 → 300（顶栏多了两个按钮，260 会把标题挤没），并删掉 `tauri.conf.json` 里主窗口 `create: false` 下不生效的 `minWidth/minHeight`；标题截断时悬停由 `title` 属性给出完整文件名。
 11. **点标题栏提交内联编辑（0.4.0，[#4](https://github.com/zwxdogs/desktop-todo/issues/4)）**：用户可见行为与 Tk 一致（`todo.pyw:912-925` 就是提交），差别在实现——`app.js` 的"点编辑框外面提交"与"点菜单外关闭"、`panel.js` 的同款关菜单三条 document mousedown 改到**捕获阶段**。捕获先于注入脚本的冒泡监听，不再被 `preventDefault` 连带打断 input 的 blur（原来两者都会让编辑停在未提交状态）。
-12. **＋ 从「末尾加待办」改成「新建待办文件」（0.4.0）**：第一次打开时可能一个 md 都没有，而此前没有"新建"这条路（缺文件只提示右键→更换文件，那是"打开已有"）。现在顶栏第 2 个图标是「新建待办文件…」（文档+加号 SVG），夹在「更换文件」「打开文件位置」之间、分组竖线左侧（用户要求 ＋ 在竖线左边）；点击走原生另存为，默认名 `待办.md`，默认目录 = 当前文件父目录、文件不存在时用 exe 目录，父目录不存在会一并创建。用户在对话框里指到**已存在**的文件时按"打开已有文件"处理，绝不覆盖。新建成功的文件写入一段示例（`app/ui/starter.js` 的 `starterText`），用示例自己教用法：右键加待办、点方框勾选、双击打开详情面板改名、Ctrl+Z、自动保存，以及"父任务 + 缩进备注"一对（主列表不渲染备注且子项会折叠，没有这一对没人会发现面板）。示例只是文件内容，此后永不自动改写，用户自己删。缺失状态的提示改为按顶栏按钮序号指路（"第 2 个图标新建 / 第 1 个图标打开已有"），序号在运行时按 `#hdr .hbtn` 顺序算，不写死。同一处顺带修掉一个会毁掉首次引导的 bug：缺失状态下退出会把空内容写盘，于是下次启动"文件已存在"、示例再也不会生成——`exitApp`/`refreshFromDisk` 现在要 `S.loaded && !S.missingShown` 才写，空白处右键菜单在缺失时只剩「退出」，`addTodoEnd` 也不再隐式建文件。
+12. **＋ 从「末尾加待办」改成「新建待办文件」（0.4.0）**：第一次打开时可能一个 md 都没有，而此前没有"新建"这条路（缺文件只提示右键→更换文件，那是"打开已有"）。现在顶栏第 2 个图标是「新建待办文件…」（文档+加号 SVG），夹在「更换文件」「打开文件位置」之间、分组竖线左侧（用户要求 ＋ 在竖线左边）；点击走原生另存为，默认名 `待办.md`，默认目录 = 当前文件父目录、文件不存在时用 exe 目录，父目录不存在会一并创建。用户在对话框里指到**已存在**的文件时按"打开已有文件"处理，绝不覆盖。新建成功的文件写入一段示例（`app/ui/starter.js` 的 `starterText`），用示例自己教用法：右键空白处添加分组、鼠标停在行右缘露出加号加待办、点方框勾选、双击打开详情面板改名、Ctrl+Z、自动保存，以及"父任务 + 缩进备注"一对（主列表不渲染备注且子项会折叠，没有这一对没人会发现面板）。示例只是文件内容，此后永不自动改写，用户自己删。缺失状态的提示改为按顶栏按钮序号指路（"第 2 个图标新建 / 第 1 个图标打开已有"），序号在运行时按 `#hdr .hbtn` 顺序算，不写死。同一处顺带修掉一个会毁掉首次引导的 bug：缺失状态下退出会把空内容写盘，于是下次启动"文件已存在"、示例再也不会生成——`exitApp`/`refreshFromDisk` 现在要 `S.loaded && !S.missingShown` 才写，空白处右键菜单在缺失时只剩「退出」（§3-14：现在只剩「在末尾添加分组」且置灰），`addTodoEnd` 也不再隐式建文件（§3-14：该函数已删除，加待办走行上的加号）。
 13. **自绘滚动条（0.4.1 新增，Tk 0.2.7 没有）**：Tk 0.2.7 只认滚轮，界面上没有任何滚动条；0.4.0 沿用了原生条，它贯穿整条右缘（连标题栏一起）且常显。0.4.1 起 `body` 不再滚动、`#list` 自己滚（标题栏固定 34px，滚轮落在标题栏上不影响内容），主窗口与面板两栏各挂一条 6px 浮层拇指（`app/ui/scrollbar.js`）：滚动淡入 120ms、停手 900ms 后淡出 350ms、悬停与拖动加深、可拖动、鼠标停在拇指上不淡出，不滚时完全不可见——比 0.2.7 多出"看得见也能拖"这一层能力（用户 2026-11-13 定稿，原话："不需要键盘能操作，只需要鼠标可以操作就行"）。原生条改为在各滚动容器上藏掉（此前 `scrollbar-width:none` 挂在 `body` 上，Chromium 只认滚动容器自己，等于从没生效）。`prefers-reduced-motion` 时不做淡入淡出、直接显隐。拇指几何统一走纯函数 `thumbLayout()`（8 项单测），DOM 侧的淡入淡出与拖动没有可测接缝，靠实机手验。已知重叠：拇指占右缘 3–9px，与行右缘的拖动把手（右缘 2–20px）最外 6px 重叠——拇指可见时那 6px 先归拇指（能拖滚动条），把手还剩左侧 12px 可抓，两者不互相打死。
+14. **加待办改成行右缘的悬停加号（0.4.1 新增，[ADR 0007](../docs/adr/0007-inline-add-plus.md)）**：Tk 0.2.7 有三条加待办入口——行菜单「在下方插入待办」、分组菜单「在此分组添加待办」、空白菜单「在末尾添加待办」；三处全删，`addTodoEnd` 连函数一起删。改成鼠标悬停在待办或分组标题上时、在拖动把手左侧 22px 露出一个 12px 加号（`app/ui/plus.js` 的 `plusButton`，两窗共用），点它就在该条目下方一行插入一条待办并进内联编辑：待办落在整棵子块之后（`md.todoBelow` → `subtreeEnd-1`），分组标题取组内第一条待办的缩进（`md.groupTodoIndent`，先撞空行或下一个组头就顶格），两个落点都是纯函数、8 项单测。加号上右键等同该行右键。详情面板两栏的行同样有加号（插子待办/插备注，同样落在整棵子块之后），点击前先 `commitPending` 提交未完成的编辑；底部那两个「＋ 添加子待办 / ＋ 添加备注」保留（空栏时是唯一入口），同样先提交。行内编辑中该行藏起加号与把手（`editing` class 由 `dropEditor` 统一撤），拖动中（`body.dragging`）全局藏起加号；加号 `mousedown` 一律 `preventDefault`，否则"正在编辑另一行时点加号"会先被 blur 提交+重渲染吞掉这次点击。空白菜单只剩「在末尾添加分组」，文件缺失时该项置灰（`showMenu` 新增 `disabled`：灰字、点击吞掉且菜单不关）；退出只剩顶栏 ✕。空清单（没有任何可见行，含只有空行或只有被隐藏的顶格备注）在离顶 44px 处显示灰字「右键空白处，添加分组」（`addEmptyHint` 按上方空行的 8px 间隙扣算，`pointer-events:none`）。为了让位，徽标悬停左移 20→40px，行文字右内边距 42→64px，分组标题 40→62px，标题上的加号 `right:28px`、把手 `right:8px`；菜单最小宽 160→120px。用户 2026-11-13 三轮裁决，原话："在每个待办或分组名的右边……鼠标移动到上面时显示出一个加号""空清单要通过灰色字体提示用户右键添加分组"。
 
 ## 4. 验证状态
 
@@ -100,3 +102,4 @@
 - [x] ADR 0005 解除对等约束（2026-11-13）：本文件顶部改写角色、§3 补 #3/#4 两条偏离、§2 的 menu_title 与顶栏按钮行同步；0003 / 0004 / AGENTS.md 互相引用，仓库内不再有"必须与 0.2.7 完全一致"的表述
 - [x] 0.4.1 自绘滚动条（2026-11-13，[#10](https://github.com/zwxdogs/desktop-todo/issues/10)）：`node --test app/ui/*.test.js` 97/97（新增 `app/ui/scrollbar.test.js` 8 项拇指几何）、`node --check app/ui/app.js app/ui/panel.js app/ui/scrollbar.js`、`app\build.ps1` release 构建后部署重启。显隐与拖动没有可测接缝，验收走 WebView2 远程调试实机核对（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，CDP `Runtime.evaluate` + `Input.dispatchMouseEvent`）：滚轮落标题栏 `#list.scrollTop` 保持 0；落清单则滚动且 `class="vscroll on show"`、`opacity` 60ms 内到 1、停手 1.2s 后回 0；鼠标停在拇指上 1.3s 仍为 1（不淡出）；按住拇指拖 32px → `scrollTop` 120→233（理论 32×414/117≈113.2，实测 113）、拖动中 `class` 含 `dragging`；把 `#list` 的 flex 改成 `0 0 200px` 后轨道 578→174、拇指 569→57，`ResizeObserver` 跟上。截图验收改用 CDP `Page.captureScreenshot`：`PrintWindow` + `PW_RENDERFULLCONTENT` 抓不到带 opacity 过渡的合成层，会把"条子明明在闪"拍成"什么都没有"，别再拿它判断显隐动画
 - [x] 0.4.0 ＋ = 新建待办文件（2026-11-13）：`node --test --test-isolation=none app/ui/*.test.js` 89/89（新增 `app/ui/starter.test.js` 6 项：示例行序、分组标题、备注缩进、逐行换行符、提示文案、"序号为 0 时不出现第 0 个"）、`node --check app/ui/app.js` / `app/ui/starter.js`、`cargo check --release` 通过，`app\build.ps1` release 构建后部署重启；DOM 接线没有可测接缝（现有测试全是纯函数），验收靠实机手测——缺文件时提示里的两个序号与顶栏图标顺序一致、点 ＋ 另存为建出的文件带示例、指到已存在文件时只打开不覆盖、缺失状态退出不落空文件且下次启动仍缺文件、示例里的父任务+备注在详情面板里能对上
+- [x] 0.4.1 加待办改行内加号（2026-11-13，[ADR 0007](../docs/adr/0007-inline-add-plus.md)）：`node --test app/ui/*.test.js` 106/106（新增 `app/ui/md.insert.test.js` 9 项：分组标题缩进、无子项待办、带子块插整块之后、组头后空行/组头/文件末尾顶格、子块尾空行不算块内、末行无换行、tab 与空格混用原样带回、note/other/blank/越界返回 null）、`node --check app/ui/app.js app/ui/panel.js app/ui/md.js app/ui/plus.js`、`app\build.ps1` release 构建后部署重启；DOM 侧的悬停显形、点击落点、提交时序没有可测接缝（现有测试全是纯函数），验收靠实机手测——悬停加号出现且与徽标不重叠、点加号新行落在整块下方并进编辑、拖动中与编辑中不露加号、空白菜单只剩加分组且缺文件时置灰、空清单灰字离顶约 44px、面板加号与底部「＋」点击前先提交在编辑的那一条

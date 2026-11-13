@@ -7,6 +7,7 @@
 'use strict';
 
 import { attachScrollbar } from './scrollbar.js';
+import { plusButton } from './plus.js';
 
 /* __TAURI__ 由注入脚本在页面加载后写入，panel.js 可能先于它执行（与 app.js 早期同类竞态）。
    因此所有 IPC 都等就绪后再发；就绪前产生的请求排队，就绪后补发。 */
@@ -54,13 +55,24 @@ function boxSvg(checked) {
     '<rect x="2" y="2" width="14" height="14" fill="none" stroke="#C6CCD4" stroke-width="1"/></svg>';
 }
 
+/* 离开编辑态前先把未定稿的文字交回去（删除/插行/关面板都走这里）。
+   顺序要紧：先 teardown 再 commitEdit——主窗口回推新一轮数据时若还挂着 P.edit，
+   onPanelData 会再提交一次并 return，把那一轮渲染吞掉（新行就进不了编辑）。 */
+function commitPending() {
+  if (!P.edit) return;
+  const { j, input } = P.edit;
+  const value = input.value;
+  teardownEdit();
+  commitEdit(j, value);   // commitEdit 自己会 setEditing(false)，这里别再发一次
+}
+
 function pMenu(j, x, y) {
   // Tk p_menu(1422-1433)：子待办是叶子，只有编辑与删除
   showMenu([
     { label: '编辑', fn: () => pEdit(j) },
     { label: '删除', fn: () => {
         // Tk delete_line 前会 _commit_edits：先提交未定稿编辑再删
-        if (P.edit) commitEdit(P.edit.j, P.edit.input.value);
+        commitPending();
         emitReq({ type: 'delete', j });
       } },
   ], x, y);
@@ -97,6 +109,7 @@ function buildRow(container, item, isTodo) {
   lbl.addEventListener('dblclick', () => pEdit(item.j));
   row.appendChild(lbl);
   addHandle(row, item.j, container);   // 0.4.0：拖动手柄
+  addPlus(row, item.j, kind);          // ADR 0007：在这行下面插一条同类条目
   container.appendChild(row);
   return lbl;
 }
@@ -142,6 +155,25 @@ function addHandle(row, j, pane) {
     pMenu(j, e.clientX, e.clientY);
   });
   row.appendChild(h);
+}
+
+/* 行内加号（ADR 0007）：点它在这行下面插一条同类条目（子待办插兄弟，备注插备注）。
+   先收掉未定稿的编辑，否则主窗口回推的新数据会被 onPanelData 的提交逻辑吞掉。 */
+function addPlus(row, j, kind) {
+  const p = plusButton(kind === 'todo' ? '在下方添加子待办' : '在下方添加备注');
+  p.addEventListener('click', (e) => {
+    e.stopPropagation();
+    commitPending();
+    emitReq({ type: 'add-below', kind, j });
+  });
+  p.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (DND.on) { cleanupDrag(); return; }
+    hideMenu();
+    pMenu(j, e.clientX, e.clientY);
+  });
+  row.appendChild(p);
 }
 
 function startDrag(e, j, pane, handle) {
@@ -358,6 +390,7 @@ function pEditAt(lbl, j) {
   input.className = 'row-edit' + (lbl.classList.contains('done') ? ' done' : '');
   input.value = lbl.textContent.replace(/^• /, '');
   lbl.style.display = 'none';
+  lbl.parentNode.classList.add('editing');   // 编辑中把加号和把手收起来（CSS 只管显隐）
   lbl.parentNode.insertBefore(input, lbl.nextSibling);
   input.select();
   input.focus();
@@ -420,6 +453,7 @@ function teardownEdit() {
   P.edit = null;
   input.remove();
   label.style.display = '';
+  label.parentNode.classList.remove('editing');
 }
 
 function commitEdit(j, value) {
@@ -501,8 +535,8 @@ document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 $('panel-x').addEventListener('click', () => emitReq({ type: 'close' }));
 $('panel-x').addEventListener('mousedown', (e) => e.preventDefault());
-$('add-todo').addEventListener('click', () => emitReq({ type: 'add-todo' }));
-$('add-note').addEventListener('click', () => emitReq({ type: 'add-note' }));
+$('add-todo').addEventListener('click', () => { commitPending(); emitReq({ type: 'add-todo' }); });
+$('add-note').addEventListener('click', () => { commitPending(); emitReq({ type: 'add-note' }); });
 for (const id of ['panel-x', 'add-todo', 'add-note']) {
   $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
 }
