@@ -7,6 +7,7 @@
 
 import * as md from './md.js';
 import { createUndoStack } from './undo.js';
+import { starterText, missingHint } from './starter.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -38,6 +39,7 @@ const S = {
   lastSeen: null,
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
+  loaded: false,   // 内存里的 S.lines 是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
   edit: null,            // { index, input }
   panelOpen: false,
   panelTodo: -1,
@@ -149,14 +151,20 @@ async function doSave() {
 
 /* ---------- 文件装载（todo.pyw:565-602） ---------- */
 
+/* 缺文件占位（0.4.0）：不再提「右键 → 更换文件…」（那条标题栏菜单已经整块删了），
+   改成按顶栏图标的实际顺序报序号，用户照着点就行。序号每次现算，以后调按钮顺序
+   这句话会自己跟着变，不会指错地方。 */
 function showMissing() {
   if (S.missingShown) return;
   S.missingShown = true;
+  S.loaded = false;
   listEl.textContent = '';
   ROWS.clear();
+  VIS.length = 0;
+  const btnIdx = (id) => [...document.querySelectorAll('#hdr .hbtn')].indexOf($(id)) + 1;
   const div = document.createElement('div');
   div.className = 'missing';
-  div.textContent = `文件不存在：\n${S.file}\n\n点顶栏「更换文件…」可选择新的文件`;
+  div.textContent = missingHint(btnIdx('btn-new'), btnIdx('btn-choose'));
   listEl.appendChild(div);
 }
 
@@ -185,6 +193,7 @@ async function loadFile() {
   S.hasBom = data.has_bom;   // Tk has_bom 存实例，写回沿用
   S.lines = md.parseText(data.text);
   S.lastSeen = await statNow();
+  S.loaded = true;
   S.undoStack = createUndoStack(50);   // 文件被外部/重新加载, 撤销历史失效
   let base = basename(S.file);
   if (base.toLowerCase().endsWith('.md')) base = base.slice(0, -3);
@@ -198,7 +207,9 @@ async function refreshFromDisk() {
   await requestPanelCommit();
   closeEditor();
   cancelSave();
-  if (await fileStateExists()) {
+  // 只有"内存里确实是从这个文件读出来的清单"才允许先写后读；否则 ↻ 会把一个
+  // 读取失败/尚未装载的文件清空（S.loaded 见 exitApp 同一处理由）。
+  if (S.loaded && await fileStateExists()) {
     try {
       if (await writeText(md.serialize(S.lines))) {
         log(`saved ${S.lines.length} lines`);
@@ -504,13 +515,9 @@ async function deleteLine(i) {
 }
 
 async function addTodoEnd() {
-  // todo.pyw:969-978
-  if (!(await fileStateExists())) {
-    S.lines = [];
-    S.missingShown = false;
-    await writeText('- [ ] 新待办' + S.nl);
-    S.lastSeen = await statNow();
-  }
+  // todo.pyw:969-978。0.4.0 起没有文件时不再"就地建一个只有一条待办的文件"：
+  // 新建文件只走顶栏 ＋（会带示例内容），这里没装载成功的清单一律不写。
+  if (S.missingShown || !S.loaded) return;
   if (!S.lines.length) {
     insertLine(-1, 'todo', '', '新待办');
     return;
@@ -844,12 +851,16 @@ function menuRow(i, x, y) {
 }
 
 function menuBlank(x, y) {
-  showMenu([
-    { label: '在末尾添加待办', fn: addTodoEnd },
-    { label: '在末尾添加分组', fn: () => insertGroup(S.lines.length - 1) },
-    'sep',
-    { label: '退出', fn: exitApp },
-  ], x, y);
+  const items = [];
+  // 文件缺失时没有可写的目标：加待办/加分组会让 addTodoEnd 隐式建一个只有一条待办的文件，
+  // 绕过 ＋ 的示例内容。此时只留「退出」，新建文件走顶栏 ＋ 这一条路。
+  if (!S.missingShown) {
+    items.push({ label: '在末尾添加待办', fn: addTodoEnd });
+    items.push({ label: '在末尾添加分组', fn: () => insertGroup(S.lines.length - 1) });
+    items.push('sep');
+  }
+  items.push({ label: '退出', fn: exitApp });
+  showMenu(items, x, y);
 }
 
 /* 原“右键标题栏”菜单（更换文件… / 打开文件位置 / 退出）已整块删除，前两项改由顶栏常驻图标接管
@@ -1016,14 +1027,41 @@ function pAddNote() {
 
 /* ---------- 文件/窗口杂项（todo.pyw:1488-1538） ---------- */
 
+/* 切到另一个文件（更换文件 / 新建共用）。Rust 侧的 Shared.file 已经由对应命令改好，
+   这里只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。 */
+async function switchToFile(path) {
+  S.file = path;
+  S.missingShown = false;
+  closePanel();
+  await loadFile();
+  invoke('save_config');
+}
+
 async function chooseFile() {
   const path = await invoke('choose_file');
-  if (path) {
-    S.file = path;
-    S.missingShown = false;
-    await loadFile();
-    invoke('save_config');
+  if (path) await switchToFile(path);
+}
+
+/* ＋ 新建待办文件（0.4.0）：原生「另存为」挑位置，新路径写一份示例内容；
+   指到已存在的文件则当"打开已有文件"处理，绝不覆盖。 */
+async function newFile() {
+  await requestPanelCommit();    // 面板里改了一半的任务名先落回来，别丢
+  // 再把还没落盘的改动写回去：切走之后 S.lines 马上就换成新文件的内容
+  const pending = !!S.saveTimer;
+  cancelSave();
+  closeEditor();
+  if (pending && S.loaded && !S.missingShown) await writeText(md.serialize(S.lines));
+  let res;
+  try {
+    res = await invoke('new_md_file', { content: starterText('\r\n') });
+  } catch (e) {
+    log(`new file failed: ${e}`);
+    setTitle('新建失败!');
+    return;
   }
+  if (!res) return;                                  // 对话框取消
+  await switchToFile(res.path);
+  log(res.created ? `created ${res.path}` : `existing file opened: ${res.path}`);
 }
 
 function toggleDock() {
@@ -1073,7 +1111,10 @@ async function exitApp() {
     closeEditor();
     closePanel();
     cancelSave();
-    if (await writeText(md.serialize(S.lines))) {
+    // 没装载成功就绝不写盘（0.4.0 修）：以前无条件写，退出一次就"生"出一个空文件，
+    // 下次启动看着像本来就有文件，示例内容和新建引导再也不会出现；
+    // 读取失败（比如文件不是 UTF-8）时同理——内存里那份空清单不是文件的内容。
+    if (S.loaded && !S.missingShown && await writeText(md.serialize(S.lines))) {
       log(`saved ${S.lines.length} lines`);
     }
   } catch (e) { /* Tk on_close 同款吞异常 */ }
@@ -1083,8 +1124,8 @@ async function exitApp() {
 
 /* ---------- 顶栏/把手绑定 ---------- */
 
-/* 顶栏六个图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：同一个 13px 画布、
-   .5 坐标、1px 线，六枚才逐像素对齐。以前 ＋ 📌 ↻ ✕ 用字体字形（14pt / 9pt /
+/* 顶栏图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：同一个 13px 画布、
+   .5 坐标、1px 线，几枚才逐像素对齐。以前 ＋ 📌 ↻ ✕ 用字体字形（14pt / 9pt /
    13pt / 12pt），字号与基线各不相同，顶栏里横竖都错位。
    更换文件 = 纯文档页（矩形 + 右上折角），不叠箭头 —— 13px 下两笔会糊；
    打开文件位置 = ↗，与资源管理器“在文件夹中显示”同义；↻ = 圆形箭头，
@@ -1098,8 +1139,13 @@ const ICON_REVEAL_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M3.5 9.5L9.5 3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
   + '<path d="M6.5 3.5H9.5V6.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>'
   + '</svg>';
-const ICON_ADD_SVG = '<svg viewBox="0 0 13 13" fill="none">'
-  + '<path d="M6.5 2.5V10.5M2.5 6.5H10.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+/* ＋ 换成“文档 + 加号”（用户拍板 b）：13px 下与“更换文件”的纯文档页同族，
+   右下角让出一小块放加号——页纸描边在那里断开，加号才不糊成一团。 */
+const ICON_NEW_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M2.5 1.5H7.5L10.5 4.5V7.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M2.5 1.5V11.5H8" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M7.5 1.5V4.5H10.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M10 8.5V12.5M8 10.5H12" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
   + '</svg>';
 const ICON_CLOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M3.2 3.2L9.8 9.8M9.8 3.2L3.2 9.8" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
@@ -1118,21 +1164,22 @@ function bindChrome() {
   on('btn-close', exitApp);
   on('btn-refresh', refreshFromDisk);
   on('btn-pin', toggleDock);
-  on('btn-add', addTodoEnd);
+  on('btn-new', newFile);
   // 两个常驻图标接管原“右键标题栏”菜单的前两项。文件缺失（S.missingShown）时两者仍可用：
-  // 更换文件正是缺失时唯一的出路；↗ 交给 Rust 侧的“路径不存在”提示，不静默失败。
+  // 更换文件是打开已有 md 的入口，＋ 是新建的入口——缺失状态下这两个按钮就是全部的出路；
+  // ↗ 交给 Rust 侧的“路径不存在”提示，不静默失败。
   on('btn-choose', chooseFile);
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
   $('btn-choose').innerHTML = ICON_CHOOSE_SVG;
   $('btn-reveal').innerHTML = ICON_REVEAL_SVG;
   // 其余四枚也走同一套注入：HTML 里只留空按钮，图标只在 app.js 有一份定义。
   const ICONS = {
-    'btn-add': ICON_ADD_SVG, 'btn-pin': ICON_PIN_SVG,
+    'btn-new': ICON_NEW_SVG, 'btn-pin': ICON_PIN_SVG,
     'btn-refresh': ICON_REFRESH_SVG, 'btn-close': ICON_CLOSE_SVG,
   };
   for (const [id, svg] of Object.entries(ICONS)) $(id).innerHTML = svg;
   // Tk 按钮按下不夺焦点（Canvas 无焦点），防止空格键误触
-  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-add', 'btn-choose', 'btn-reveal']) {
+  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-new', 'btn-choose', 'btn-reveal']) {
     $(id).addEventListener('mousedown', (e) => e.preventDefault());
     $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
   }

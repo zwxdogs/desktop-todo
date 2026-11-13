@@ -17,7 +17,7 @@
 | delete_subtree (236-254) | deleteSubtree | 等效 |
 | —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
 
-测试：`node --test app/ui/*.test.js` = **83/83**（md + undo，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
+测试：`node --test app/ui/*.test.js` = **89/89**（md + undo + 新建示例文案，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
 
 ## 2. 应用层逐函数对照
 
@@ -37,7 +37,7 @@
 | toggle_line(827) | app.js（box click → toggle → render → save） | 等效 |
 | insert_line(927) | app.js insertLine（ref=pos??i；nl 补行；30ms 后聚焦新行） | 等效 |
 | delete_line(945) | app.js deleteLine（子块连删；面板命中→关面板） | 等效 |
-| add_todo_end(969) | app.js addTodoEnd（无文件→建文件；空表插首；否则尾插） | 等效 |
+| add_todo_end(969) | app.js addTodoEnd（空表插首；否则尾插；文件缺失时不再就地建文件，新建只走 ＋，§3-12） | 等效* |
 | group_block_end/insert_group(981-997) | app.js insertGroup（nl 补在 pos-1；插入 pos；30ms 编辑） | 等效 |
 | push_undo/undo(1000-1023) | undo.js + app.js undo（编辑中忽略；栈顶同跳过；cap 50） | 等效 |
 | schedule_save/do_save(1026-1038) | app.js scheduleSave/doSave（250ms 防抖；失败标题「保存失败!」） | 等效 |
@@ -53,6 +53,7 @@
 | p_add_todo/p_add_note(1435/1445) | app.js pAddTodo/pAddNote（pos/child_indent 逐参数一致） | 等效 |
 | _next_todo_indent(1454) | app.js nextTodoIndent | 等效 |
 | choose_file(1488) | app.js chooseFile + Rust rfd（initdir/过滤器；path 落 Rust Shared.file） | 等效 |
+| —（0.4.0 新增） | Rust new_md_file + app.js newFile（rfd 另存为：默认名 `待办.md`、默认目录=当前文件父目录或 exe 目录、父目录缺则建；目标已存在→只切换不覆盖；新建时写入 starterText 示例，§3-12） | 新增 |
 | open_file_location(1499) | Rust open_file_location（explorer /select、"路径"；父目录；双不存在弹窗） | 等效 |
 | toggle_dock/_update_pin(1517-1538) | app.js toggleDock/updatePin + Rust set_docked_state/apply_docked（点亮=固定在桌面：压底+TOOLWINDOW+无任务栏；不点亮=普通窗口：正常 z 序+任务栏图标；两态都不 topmost） | 语义改写（ADR 0004） |
 | poll(1541) | Rust poll_tick（贴桌面维持/Win+D 还原/面板 topmost 自愈/离屏救援）+ app.js（文件变化/missing） | 等效 |
@@ -78,10 +79,11 @@
 9. **测试模式不写 config.json（ADR 0004 期间新增）**：`DesktopTodo.exe <file> <dock|float>` 本来就从不读 config.json，但以前退出时照样把测试文件与测试窗口尺寸写进 exe 同目录的 config.json——跑一次探针就会把用户真实部署的配置改掉（2026-11-13 实测踩到，部署实例一度指向临时测试文件）。现在 testing 分支下 `write_config` 直接返回并记一行 `test mode: config.json not written`。
 10. **标题栏右键菜单取消，改顶栏常驻图标（0.4.0，[#3](https://github.com/zwxdogs/desktop-todo/issues/3)）**：原「右键标题栏 → 更换文件… / 打开文件位置 / 退出」整块删除，前两项改为顶栏两个常驻图标（内联单色 SVG，13px，热区 30×26，tooltip 走 `title`），中间 1px 分组竖线（`pointer-events: none`，穿透后等同点标题栏空白可拖窗）；右键标题栏现在什么也不发生。原因不是审美：Tauri 注入的 `window/scripts/drag.js` 在 document **冒泡**期注册 mousedown，命中 `data-tauri-drag-region` 时 `preventDefault + stopImmediatePropagation + start_dragging`，页面脚本冒泡期注册的"点菜单外面关掉"永远收不到——"菜单弹出后点标题栏关不掉"在该载体下修不好；常驻图标没有开合状态，直接绕开整类问题。退出只剩顶栏 ✕ 与列表空白右键菜单里的「退出」。顺带：最小内宽 260 → 300（顶栏多了两个按钮，260 会把标题挤没），并删掉 `tauri.conf.json` 里主窗口 `create: false` 下不生效的 `minWidth/minHeight`；标题截断时悬停由 `title` 属性给出完整文件名。
 11. **点标题栏提交内联编辑（0.4.0，[#4](https://github.com/zwxdogs/desktop-todo/issues/4)）**：用户可见行为与 Tk 一致（`todo.pyw:912-925` 就是提交），差别在实现——`app.js` 的"点编辑框外面提交"与"点菜单外关闭"、`panel.js` 的同款关菜单三条 document mousedown 改到**捕获阶段**。捕获先于注入脚本的冒泡监听，不再被 `preventDefault` 连带打断 input 的 blur（原来两者都会让编辑停在未提交状态）。
+12. **＋ 从「末尾加待办」改成「新建待办文件」（0.4.0）**：第一次打开时可能一个 md 都没有，而此前没有"新建"这条路（缺文件只提示右键→更换文件，那是"打开已有"）。现在顶栏第 2 个图标是「新建待办文件…」（文档+加号 SVG），夹在「更换文件」「打开文件位置」之间、分组竖线左侧（用户要求 ＋ 在竖线左边）；点击走原生另存为，默认名 `待办.md`，默认目录 = 当前文件父目录、文件不存在时用 exe 目录，父目录不存在会一并创建。用户在对话框里指到**已存在**的文件时按"打开已有文件"处理，绝不覆盖。新建成功的文件写入一段示例（`app/ui/starter.js` 的 `starterText`），用示例自己教用法：右键加待办、点方框勾选、双击打开详情面板改名、Ctrl+Z、自动保存，以及"父任务 + 缩进备注"一对（主列表不渲染备注且子项会折叠，没有这一对没人会发现面板）。示例只是文件内容，此后永不自动改写，用户自己删。缺失状态的提示改为按顶栏按钮序号指路（"第 2 个图标新建 / 第 1 个图标打开已有"），序号在运行时按 `#hdr .hbtn` 顺序算，不写死。同一处顺带修掉一个会毁掉首次引导的 bug：缺失状态下退出会把空内容写盘，于是下次启动"文件已存在"、示例再也不会生成——`exitApp`/`refreshFromDisk` 现在要 `S.loaded && !S.missingShown` 才写，空白处右键菜单在缺失时只剩「退出」，`addTodoEnd` 也不再隐式建文件。
 
 ## 4. 验证状态
 
-- [x] 纯函数 TDD 83/83（`node --test app/ui/*.test.js`，2026-11-13）
+- [x] 纯函数 TDD 89/89（`node --test app/ui/*.test.js`，2026-11-13）
 - [x] Rust release 编译通过（`app\build.ps1`，产物 `dist\DesktopTodo\DesktopTodo.exe`，2026-11-13）
 - [x] TEST_MODE 运行时 parity：勾选/行内编辑/删除/Ctrl+Z/面板开合与内容/改名/删除、两次启动无漂移、Win+D 自愈、拖动与 grip 落盘（2026-11-13，票 #1）
 - [x] 人工视觉对比（0.2.7 vs 0.3.0 截图；行距 26px、勾选框/文字/徽标同中线，用户确认）
@@ -93,3 +95,4 @@
 - [x] ADR 0004 code-review（Standards + Spec 两轴，2026-11-13）：硬违规已修（本文件验证条目补上命令）。判据项已修：「`DockStyle.appwindow` 与 `toolwindow` 互为反值」→ 合并进 `set_ex_flags` 内部互斥维护；「hwnd 取值重复 6 处」→ 抽 `win_hwnd`；「托盘 id 是裸字符串」→ 提为 `TRAY_SHOW`/`TRAY_DOCK`/`TRAY_QUIT`；「切换模式仍由前端算终态」→ 前端只上报目标态，真相源是 Rust 的 `Shared.docked`；「`save_config` 双写」→ 删前端那次；「`sync_tray_check` 并发乱序」→ 改单线程通道只落最新值；「ADR 说取内嵌图标却留纯色 fallback」→ 删 fallback；`updatePin` → `updateDockButton`。不采纳：给 ADR 新增 frontmatter 关系字段（0003 顶部已有取代注记）、为三处 `thread::spawn` 抽薄包装
 - [x] 0.4.0 顶栏图标 + 点标题栏提交编辑（2026-11-13，[#3](https://github.com/zwxdogs/desktop-todo/issues/3) / [#4](https://github.com/zwxdogs/desktop-todo/issues/4)）：`node --test --test-isolation=none app/ui/*.test.js` 83/83、`node --check` 两文件、`cargo check` 通过，`app\build.ps1` release 构建后部署重启；DOM 事件顺序没有可测接缝（现有测试全是纯函数），验收靠实机手测——编辑中点标题栏空白/文字提交并落盘、右键标题栏无菜单、分组竖线可拖窗、最窄 300 时标题省略、双击最大化与拖动排序不回归
 - [x] ADR 0005 解除对等约束（2026-11-13）：本文件顶部改写角色、§3 补 #3/#4 两条偏离、§2 的 menu_title 与顶栏按钮行同步；0003 / 0004 / AGENTS.md 互相引用，仓库内不再有"必须与 0.2.7 完全一致"的表述
+- [x] 0.4.0 ＋ = 新建待办文件（2026-11-13）：`node --test --test-isolation=none app/ui/*.test.js` 89/89（新增 `app/ui/starter.test.js` 6 项：示例行序、分组标题、备注缩进、逐行换行符、提示文案、"序号为 0 时不出现第 0 个"）、`node --check app/ui/app.js` / `app/ui/starter.js`、`cargo check --release` 通过，`app\build.ps1` release 构建后部署重启；DOM 接线没有可测接缝（现有测试全是纯函数），验收靠实机手测——缺文件时提示里的两个序号与顶栏图标顺序一致、点 ＋ 另存为建出的文件带示例、指到已存在文件时只打开不覆盖、缺失状态退出不落空文件且下次启动仍缺文件、示例里的父任务+备注在详情面板里能对上

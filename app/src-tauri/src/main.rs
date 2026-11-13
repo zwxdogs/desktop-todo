@@ -623,6 +623,50 @@ async fn choose_file(app: AppHandle) -> Option<String> {
     })
 }
 
+/* ＋ 新建待办文件：原生「另存为」挑位置，只有路径不存在时才写入示例内容。
+   指到已存在的文件一律不覆盖——那多半是用户想打开它，交给 JS 按"打开已有文件"处理。
+   Rust 侧顺手把 Shared.file 换到新路径，随后的 save_config 才会把它落进 config.json
+   （与 choose_file 同一套语义）。
+   父目录不存在时一并 create_dir_all：write_md_file 只做 tmp + rename，自己不会建目录。 */
+#[derive(Serialize)]
+struct NewFileOut {
+    path: String,
+    created: bool,
+}
+
+#[tauri::command]
+async fn new_md_file(app: AppHandle, content: String) -> Result<Option<NewFileOut>, String> {
+    let (cur, exe_dir) = {
+        let s = app.state::<Mutex<Shared>>();
+        let s = s.lock().unwrap();
+        (s.file.clone(), s.exe_dir.clone())
+    };
+    // 默认目录 = 当前配置文件所在目录（用户上次选的地方）；文件还没落盘时退回 exe 目录。
+    let dir = if cur.exists() {
+        cur.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| exe_dir.clone())
+    } else {
+        exe_dir
+    };
+    let picked = rfd::FileDialog::new()
+        .set_title("新建待办 Markdown 文件")
+        .set_directory(&dir)
+        .set_file_name("待办.md")
+        .add_filter("Markdown 文件", &["md"])
+        .save_file();
+    let Some(p) = picked else { return Ok(None) };
+    let created = !p.exists();
+    if created {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+            }
+        }
+        write_md_file(&p, &content, false)?;
+    }
+    app.state::<Mutex<Shared>>().lock().unwrap().file = p.clone();
+    Ok(Some(NewFileOut { path: p.to_string_lossy().into_owned(), created }))
+}
+
 #[tauri::command]
 async fn open_file_location(app: AppHandle, file: String) {
     use std::os::windows::process::CommandExt;
@@ -741,7 +785,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info, read_md, write_md, file_state, save_config, set_docked,
             resize_start, poll_tick,
-            panel_open, panel_close, choose_file, open_file_location,
+            panel_open, panel_close, choose_file, new_md_file, open_file_location,
             log_line, exit_app
         ])
         .setup(move |app| {
