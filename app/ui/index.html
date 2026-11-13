@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 主窗口：桌面待办主列表。渲染/编辑逻辑见 app.js，纯函数见 md.js/undo.js -->
+<title>桌面待办</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- data-tauri-drag-region：顶栏拖动（Tk hdr/lbl_title btn-1 拖动，1602） -->
+  <header id="hdr" data-tauri-drag-region>
+    <span id="title" data-tauri-drag-region>桌面待办</span>
+    <!-- 按钮顺序对齐 Tk pack(side=right)：✕ 最右，↻、📌、＋ 依次向左 -->
+    <button class="hbtn" id="btn-add" title="在末尾添加待办">＋</button>
+    <button class="hbtn" id="btn-pin" title="悬浮置顶 / 贴桌面">📌</button>
+    <button class="hbtn" id="btn-refresh" title="从磁盘刷新">↻</button>
+    <button class="hbtn" id="btn-close" title="退出">✕</button>
+  </header>
+  <div id="list"></div>
+  <div id="grip" title="">
+    <svg viewBox="0 0 22 22" fill="none">
+      <g class="grip-line" stroke="var(--c-grip)" stroke-width="1" stroke-linecap="round">
+        <line x1="12" y1="14" x2="14" y2="12"></line>
+        <line x1="8" y1="14" x2="14" y2="8"></line>
+        <line x1="4" y1="14" x2="14" y2="4"></line>
+      </g>
+    </svg>
+  </div>
+  <div id="menu"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

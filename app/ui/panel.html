@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- 详情面板：数据由主窗口经 panel-data 事件推送，操作经 panel-req 事件回传（见 panel.js） -->
+<title>桌面待办</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="hdr">
+    <span id="panel-title"></span>
+    <!-- 双击标题改名（Tk p_rename）：默认隐藏，改名时替换 panel-title -->
+    <input id="panel-title-edit" style="display:none">
+    <span id="panel-x" title="关闭">✕</span>
+  </header>
+  <div id="panel-body">
+    <section class="pane">
+      <div class="pane-scroll" id="pane-todos"></div>
+      <div class="pane-bar"><span class="pane-add" id="add-todo">＋ 添加子待办</span></div>
+    </section>
+    <div class="pane-sep"></div>
+    <section class="pane">
+      <div class="pane-scroll" id="pane-notes"></div>
+      <div class="pane-bar"><span class="pane-add" id="add-note">＋ 添加备注</span></div>
+    </section>
+  </div>
+  <div id="menu"></div>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

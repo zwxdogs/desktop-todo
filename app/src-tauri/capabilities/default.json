@@ -1,0 +1,7 @@
+{
+  "$schema": "gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力：事件监听/发送（core:default 含 core:event 全量）+ 拖动区（data-tauri-drag-region 走 core:window IPC，需要 allow-start-dragging）；业务命令为应用自定义命令，不走权限系统。",
+  "windows": ["main", "panel"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

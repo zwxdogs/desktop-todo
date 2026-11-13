@@ -1,0 +1,24 @@
+[package]
+name = "desktop-todo"
+version = "0.3.0"
+edition = "2021"
+description = "桌面待办 —— Markdown 待办清单固定在 Windows 桌面（Tauri 2）"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+# 只为 tauri_runtime::ResizeDirection（与 tauri 依赖同一 crate 实例）
+tauri-runtime = "2"
+
+[features]
+# 打开即嵌入 frontendDist（生产形态）；不带它 cargo run 走 devUrl。
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true

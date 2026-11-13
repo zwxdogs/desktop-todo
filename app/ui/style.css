@@ -1,0 +1,298 @@
+/* 桌面待办 0.3.0 —— 0.2.7 视觉规格的 CSS 移植。
+   尺寸一律用裸 px（CSS 逻辑像素）：WebView2 随系统 DPI 自动放大，
+   1 CSS px @200% = 2 物理像素，与 Tk 的 N*s 物理像素逐位等价（spike 已实证）。
+   颜色常量与 todo.pyw 52-67 行一一对应。 */
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* 窗口 1px 发丝描边（Tk shell 外框 C_HAIRLINE）+ 唯一滚动容器 */
+  border: 1px solid #E1E6ED;
+  background: #FAFBFC;
+  color: #24292F;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-size: 10pt;
+  overflow-y: auto;
+  overflow-x: hidden;
+  user-select: none;
+  cursor: default;
+  scrollbar-width: none;          /* Tk 0.2.7 无滚动条，仅滚轮 */
+}
+body::-webkit-scrollbar { display: none; }
+
+/* ---------- 顶栏（主窗口 / 面板共用 34 规格） ---------- */
+#hdr {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: 34px;
+  background: #EDF0F4;
+  border-bottom: 1px solid #DFE4EA;   /* 发丝线分界 */
+  display: flex;
+  align-items: center;
+}
+
+#title {
+  flex: 1;
+  min-width: 0;
+  margin-left: 10px;
+  font-size: 9pt;
+  color: #24292F;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 图标按钮盒 30×26；hover/press 优先于 lit（Tk _enter/_press 无视 lit 的顺序） */
+.hbtn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: #5A6472;
+  /* Segoe UI Symbol 优先：📌 走单色图钉字形（对齐 Tk 字符渲染），＋✕↻ 回落 YaHei */
+  font-family: "Segoe UI Symbol", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-size: 12pt;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transform: translateY(-0.5px);  /* Tk 墨迹中心 -1 物理像素的等效 */
+}
+.hbtn.lit { background: #DCE9FA; color: #4A8FE2; }
+.hbtn:hover { background: #E3E8EF; color: #24292F; }
+.hbtn:active { background: #D7DEE7; color: #24292F; }
+#btn-refresh { font-size: 13pt; }
+#btn-pin { font-size: 9pt; }
+#btn-add { font-size: 14pt; }
+#btn-close { margin-right: 6px; }
+
+/* ---------- 清单区 ---------- */
+#list {
+  padding-bottom: 28px;    /* Tk 尾部 28 占位条（空白右键菜单区） */
+  min-height: calc(100vh - 35px - 28px);
+}
+
+.gap { height: 8px; }      /* Tk blank 行 */
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  padding: 2px 0;   /* 行距收紧；首行 22px 行高与勾选框/徽标共用一条中线 */
+  background: #FAFBFC;
+}
+.row:hover { background: #F2F5F8; }
+.row:active { background: #E8EEF6; }
+
+/* 分组标题行：整行占满（Tk label fill x），双击改名 */
+.row.row-header {
+  display: block;
+  padding: 0;   /* 标题行沿用自身 8/4 内边距，不随待办行加大行距 */
+  cursor: default;
+}
+.row.row-header .label {
+  display: block;
+  font-size: 11pt;
+  font-weight: bold;
+  color: #3D76B5;
+  padding: 8px 40px 4px var(--pad, 0px);
+}
+
+/* 勾选框 18：SVG viewBox 0 0 18 18 随尺寸缩放，坐标=物理格（s 单位） */
+.box {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 2px 8px 2px 0;   /* 行 padding 2 + 2 + 9 = 13，与标签首行中线一致 */
+  cursor: pointer;
+}
+.box svg { width: 100%; height: 100%; display: block; }
+
+.row .label {
+  flex: 1;
+  min-width: 0;
+  padding: 0 42px 0 0;        /* Tk wraplength 右侧 30 预留 + label 右边距 12 */
+  line-height: 22px;          /* 2 + 11 = 13，与勾选框/徽标 13 对齐 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.label.done {
+  color: #9CA3AF;
+  text-decoration: line-through;   /* Tk overstrike 字体 */
+}
+.row-note .label { color: #57606A; }
+.row-note .label.done { color: #9CA3AF; }
+.row-other .label { color: #24292F; }
+
+/* 行内编辑框（Tk ENTRY_STYLE：白底、1px accent 实线边） */
+.row-edit {
+  flex: 1;
+  min-width: 0;
+  margin: 4px 42px 4px 0;   /* 与 22px 首行 + 2px 行 padding 对齐 */
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: 10pt;
+  color: #24292F;
+  background: #FFFFFF;
+  border: 1px solid #4A8FE2;
+  outline: none;
+  user-select: text;
+}
+.row-header .row-edit {
+  display: block;
+  font-size: 11pt;
+  font-weight: bold;
+  color: #3D76B5;
+  margin: 8px 40px 4px var(--pad, 0px);
+}
+
+/* 子树徽标：勾/页线条图标 + 数字 */
+.badge {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: 22px;              /* 与首行文字同高，flex 居中 → 中线 13px */
+  margin: 0 12px 0 0;
+  color: #8B929B;
+  font-size: 9pt;
+  cursor: pointer;
+}
+.badge svg { width: 10px; display: block; }
+.badge .badge-check { height: 10px; }
+.badge .badge-note { height: 12px; }
+.badge .mid { width: 8px; }
+
+/* ---------- 右下角缩放把手（3 条斜线，22 命中区） ---------- */
+#grip {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  z-index: 30;
+  cursor: nwse-resize;
+  background: #FAFBFC;
+}
+#grip svg { width: 100%; height: 100%; display: block; }
+#grip:hover .grip-line { stroke: #8B95A1; }
+
+/* ---------- 缺文件占位 ---------- */
+.missing {
+  margin: 40px auto;
+  max-width: 300px;
+  padding: 0 16px;
+  color: #8B929B;
+  font-size: 10pt;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 右键菜单（Tk 原生 tk.Menu 的自绘等效） ---------- */
+#menu {
+  position: fixed;
+  z-index: 100;
+  background: #FFFFFF;
+  border: 1px solid #DFE4EA;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  padding: 4px 0;
+  min-width: 160px;
+  display: none;
+}
+.menu-item {
+  font-size: 9pt;
+  color: #24292F;
+  padding: 6px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.menu-item:hover { background: #F2F5F8; }
+.menu-sep {
+  height: 1px;
+  background: #DFE4EA;
+  margin: 4px 0;
+}
+
+/* ---------- 详情面板 ---------- */
+#panel-body {
+  height: calc(100vh - 35px);
+  display: grid;
+  grid-template-rows: 1fr 1px 1fr;   /* Tk uniform: 两栏严格 1:1 */
+}
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.pane-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.pane-scroll::-webkit-scrollbar { display: none; }
+.pane-sep { background: #DFE4EA; }
+.pane-bar {
+  flex-shrink: 0;
+  text-align: left;
+}
+.pane-add {
+  display: inline-block;
+  font-size: 9pt;
+  color: #4A8FE2;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.pane-add:hover { background: #F2F5F8; }
+.pane-add:active { background: #E8EEF6; }
+
+/* 面板标题行 */
+#panel-title {
+  flex: 1;
+  min-width: 0;
+  margin-left: 12px;
+  margin-right: 4px;
+  font-size: 11pt;
+  font-weight: bold;
+  color: #24292F;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#panel-title-edit {
+  flex: 1;
+  min-width: 0;
+  margin: 4px;
+  margin-left: 12px;
+  padding: 2px 4px;
+  font-family: inherit;
+  font-size: 11pt;
+  font-weight: bold;
+  color: #24292F;
+  background: #FFFFFF;
+  border: 1px solid #4A8FE2;
+  outline: none;
+  user-select: text;
+}
+#panel-x {
+  flex-shrink: 0;
+  margin-right: 6px;
+  font-size: 9pt;
+  color: #5A6472;
+  cursor: pointer;
+  padding: 7px;
+}
+#panel-x:hover { background: #E3E8EF; color: #24292F; }
+#panel-x:active { background: #D7DEE7; color: #24292F; }
+
+/* 面板行全部顶格 pad=12（Tk p_build_row） */
+#panel-body .row { --pad: 12px; }
