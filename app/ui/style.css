@@ -76,6 +76,23 @@ body::-webkit-scrollbar { display: none; }
 #btn-add { font-size: 14pt; }
 #btn-close { margin-right: 6px; }
 
+/* 顶栏图标按钮：内联单色 SVG（与 GRIP_SVG/boxSvg 同风格，currentColor 随 hover 变色）。
+   13px 画在 .hbtn 的 30×26 热区正中；文档页图标不叠箭头——13px 下两笔会糊成一团。 */
+.hbtn svg { width: 13px; height: 13px; display: block; }
+
+/* 分组竖线：[更换文件][打开文件位置] | ＋ 📌 ↻ ✕
+   pointer-events:none 是硬要求：它是 <span>，没有 data-tauri-drag-region，
+   不穿透就在按钮之间留一块 9px 死区（既点不到按钮，也拖不动窗口）；
+   穿透后命中 #hdr，等同点标题栏空白，可以拖窗口。 */
+#hdr-sep {
+  flex-shrink: 0;
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: #DFE4EA;
+  pointer-events: none;
+}
+
 /* ---------- 清单区 ---------- */
 #list {
   padding-bottom: 28px;    /* Tk 尾部 28 占位条（空白右键菜单区） */

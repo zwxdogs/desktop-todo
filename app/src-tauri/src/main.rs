@@ -756,7 +756,9 @@ fn main() {
             // #9597 workaround：创建时不抢焦点，随后压底才不会被“创建即置顶”顶回来
             let win = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(APP_NAME)
-                .min_inner_size(260.0, 180.0)
+                // 最小内宽 300：顶栏现在是 6 个 30px 按钮 + 9px 分组竖线（约 205px 固定），
+                // 260 会把标题挤到只剩十几像素；高度沿用 180。
+                .min_inner_size(300.0, 180.0)
                 .decorations(false)
                 .transparent(false)
                 .resizable(true)
@@ -786,7 +788,8 @@ fn main() {
                     Some(v) => (v as i32).min(sh - 60),
                     None => (640.0 * s) as i32,
                 };
-                let w = w.max((260.0 * s) as i32);
+                // 下限与 min_inner_size 保持一致（恢复旧 config 里更窄的尺寸时也得撑到 300）
+                let w = w.max((300.0 * s) as i32);
                 let h = h.max((180.0 * s) as i32);
                 let (x, y) = match (cfg.x, cfg.y) {
                     (Some(ax), Some(ay)) => (ax as i32, ay as i32),

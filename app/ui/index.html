@@ -10,6 +10,12 @@
   <!-- data-tauri-drag-region：顶栏拖动（Tk hdr/lbl_title btn-1 拖动，1602） -->
   <header id="hdr" data-tauri-drag-region>
     <span id="title" data-tauri-drag-region>桌面待办</span>
+    <!-- 按钮顺序（全部靠右、✕ 最右）：[更换文件][打开文件位置] | ＋ 📌 ↻ ✕
+         前两个取代原“右键标题栏”菜单的前两项（菜单已整块删除，见 app.js 根因注释）；
+         分组竖线只做视觉分组，pointer-events:none 让它等同标题栏空白（可拖窗口）。 -->
+    <button class="hbtn" id="btn-choose" title="更换文件…"></button>
+    <button class="hbtn" id="btn-reveal" title="打开文件位置"></button>
+    <span id="hdr-sep" aria-hidden="true"></span>
     <!-- 按钮顺序对齐 Tk pack(side=right)：✕ 最右，↻、📌、＋ 依次向左 -->
     <button class="hbtn" id="btn-add" title="在末尾添加待办">＋</button>
     <button class="hbtn" id="btn-pin" title="固定在桌面 / 普通窗口">📌</button>

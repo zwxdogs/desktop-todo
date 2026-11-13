@@ -74,7 +74,9 @@ const DND = {
 
 function log(msg) { invoke('log_line', { msg: String(msg) }); }
 
-function setTitle(t) { titleEl.textContent = t; }
+/* 标题被 ellipsis 截断时，悬停由 title 属性给出完整文件名（Tk 用 winfo 无此需求，0.4.x 新增）。
+   保存失败时 setTitle('保存失败!') 会连 tooltip 一起变成提示语——可接受的副作用。 */
+function setTitle(t) { titleEl.textContent = t; titleEl.title = t; }
 
 async function statNow() {
   try {
@@ -154,7 +156,7 @@ function showMissing() {
   ROWS.clear();
   const div = document.createElement('div');
   div.className = 'missing';
-  div.textContent = `文件不存在：\n${S.file}\n\n右键 → 「更换文件…」可选择新的文件`;
+  div.textContent = `文件不存在：\n${S.file}\n\n点顶栏「更换文件…」可选择新的文件`;
   listEl.appendChild(div);
 }
 
@@ -848,14 +850,13 @@ function menuBlank(x, y) {
   ], x, y);
 }
 
-function menuTitle(x, y) {
-  showMenu([
-    { label: '更换文件…', fn: chooseFile },
-    { label: '打开文件位置', fn: () => invoke('open_file_location', { file: S.file }) },
-    'sep',
-    { label: '退出', fn: exitApp },
-  ], x, y);
-}
+/* 原“右键标题栏”菜单（更换文件… / 打开文件位置 / 退出）已整块删除，前两项改由顶栏常驻图标接管
+   （退出已有 ✕）。删而不是修的原因：Tauri 2 注入的 window/scripts/drag.js 在 document 上注册
+   冒泡期 mousedown，命中 data-tauri-drag-region 时 preventDefault + stopImmediatePropagation +
+   invoke start_dragging；它注册得比页面脚本早，所以这里冒泡期的“点菜单外面关掉”永远收不到 ——
+   菜单点开后点标题栏关不掉（四个按钮在 CLICKABLE_TAGS 里，所以点按钮本来就能关）。
+   常驻图标没有开合状态，直接绕开整类问题；右键标题栏现在什么也不发生（全局 contextmenu
+   preventDefault 兜掉 WebView2 默认菜单，见 bindChrome）。 */
 
 /* ---------- 详情面板（todo.pyw:1074-1261） ---------- */
 
@@ -1080,25 +1081,39 @@ async function exitApp() {
 
 /* ---------- 顶栏/把手绑定 ---------- */
 
+/* 顶栏图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：viewBox 13 与显示尺寸 1:1，
+   坐标落在 .5 上，1px 线才不发虚。13px 画在 .hbtn 的 30×26 热区正中。
+   更换文件 = 纯文档页（矩形 + 右上折角），不叠箭头 —— 13px 下两笔会糊；
+   打开文件位置 = ↗，与资源管理器“在文件夹中显示”同义。 */
+const ICON_CHOOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M2.5 1.5H7.5L10.5 4.5V11.5H2.5Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M7.5 1.5V4.5H10.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '</svg>';
+const ICON_REVEAL_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M3.5 9.5L9.5 3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+  + '<path d="M6.5 3.5H9.5V6.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '</svg>';
+
 function bindChrome() {
   const on = (id, fn) => $(id).addEventListener('click', fn);
   on('btn-close', exitApp);
   on('btn-refresh', refreshFromDisk);
   on('btn-pin', toggleDock);
   on('btn-add', addTodoEnd);
+  // 两个常驻图标接管原“右键标题栏”菜单的前两项。文件缺失（S.missingShown）时两者仍可用：
+  // 更换文件正是缺失时唯一的出路；↗ 交给 Rust 侧的“路径不存在”提示，不静默失败。
+  on('btn-choose', chooseFile);
+  on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
+  $('btn-choose').innerHTML = ICON_CHOOSE_SVG;
+  $('btn-reveal').innerHTML = ICON_REVEAL_SVG;
   // Tk 按钮按下不夺焦点（Canvas 无焦点），防止空格键误触
-  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-add']) {
+  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-add', 'btn-choose', 'btn-reveal']) {
     $(id).addEventListener('mousedown', (e) => e.preventDefault());
     $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
   }
-  // 拖动区：hdr + 标题（data-tauri-drag-region）；右键 = menu_title（todo.pyw:474-478）
-  for (const el of [$('hdr'), titleEl]) {
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      menuTitle(e.clientX, e.clientY);
-    });
-  }
+  // 右键标题栏什么也不发生：标题栏自己的 menuTitle 绑定已删，这条全局 preventDefault
+  // 只负责吞掉 WebView2 默认菜单（与 panel.js 同款）；列表/行/把手的菜单各自 preventDefault。
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
   // 缩放把手（todo.pyw:503-506）
   $('grip').addEventListener('mousedown', (e) => {
     if (e.button === 0) invoke('resize_start');
