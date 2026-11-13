@@ -14,7 +14,7 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/d
 
 ### Baseline
 
-The Tauri 2 implementation (`app/`) is the baseline. Tk 0.2.7 (`todo.pyw` + the root `build.ps1`) is frozen: a fallback build path and a historical reference only — see `app/PARITY.md` and `docs/adr/0005-lift-tk-parity.md`. Behaviour parity with 0.2.7 is **not** a constraint; record any intentional deviation in `app/PARITY.md` §3.
+The Tauri 2 implementation (`app/`) is the baseline. The Tk 0.2.7 implementation (`todo.pyw`, its packaging chain and the root `build.ps1`) was deleted in 2026-11 — see `docs/adr/0006-remove-tk-fallback.md`; it survives only in git history and as the reference column of `app/PARITY.md`. Behaviour parity with 0.2.7 is **not** a constraint; record any intentional deviation in `app/PARITY.md` §3.
 
 ### Branching and release
 
@@ -32,4 +32,4 @@ After ANY change to source code — adding a feature, fixing a bug, refactoring,
 2. Update the local deployment at `E:\桌面待办\DesktopTodo`: stop the running `DesktopTodo.exe` process, replace `DesktopTodo.exe` from `dist\DesktopTodo\`, keep `config.json` untouched, and delete the legacy PyInstaller `_internal\` directory if it still exists.
 3. Restart the app so the user can test the new build immediately.
 
-Tests: `node --test app/ui/*.test.js` (83). The root `build.ps1` belongs to the frozen Tk 0.2.7 fallback; do not use it for the Tauri app.
+Tests: `node --test app/ui/*.test.js` (83). `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).

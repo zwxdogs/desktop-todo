@@ -1,5 +1,7 @@
 # Tauri 2 spike 实测报告（选项 C）
 
+> _本文引用的 `spike/`（原型与探针）与 `ui_audit/`（审计截图）已于 2026-11 从仓库删除（[#6](https://github.com/zwxdogs/desktop-todo/issues/6)、[ADR 0006](../../docs/adr/0006-remove-tk-fallback.md)）；需要原物时从 git 历史取。_
+
 - 日期：2026-11-12
 - 结论状态：spike 已完成并能在本机运行；**是否迁移仍待拍板**
 - 前置文档：`docs/research/desktop-widget-tech-stack.md`（栈对比）、`docs/research/tauri-electron-flutter.md`（三栈基准）、`docs/adr/0001-*.md`（留在 Tkinter，accepted 2026-11-10）、`.scratch/ui_audit/REPORT.md`（Tk 审计）

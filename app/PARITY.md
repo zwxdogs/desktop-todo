@@ -1,6 +1,6 @@
 # PARITY — Tauri 实现与 Tk 0.2.7 的历史对照（迁移期工程记录）
 
-> **角色（[ADR 0005](../docs/adr/0005-lift-tk-parity.md)，2026-11-13）**：Tauri 2 实现是基线，Tk 0.2.7 是**历史参照**（`todo.pyw` 冻结在仓库里，只作回退路径与考古）。
+> **角色（[ADR 0005](../docs/adr/0005-lift-tk-parity.md)，2026-11-13）**：Tauri 2 实现是基线，Tk 0.2.7 是**历史参照**（`todo.pyw` 已于 2026-11 从仓库删除，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)；对照以本表与 git 历史为准）。
 > 本表是 0.3.0 迁移期的逐函数工程记录，用来证明换栈时没漏功能；**它不再是约束**——新改动只要行为写清、测试守住、偏离记进 §3，不需要在这里补一行对照才被批准。
 > 「等效」= 迁移当时的用户可见行为一致；之后有意改动的条目在「状态」列注明，并按 §3 追加一条偏离记录。
 
@@ -17,7 +17,7 @@
 | delete_subtree (236-254) | deleteSubtree | 等效 |
 | —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
 
-测试：`node --test app/ui/*.test.js` = **83/83**（md + undo，与 test_todo.py 36 用例同源扩展）。
+测试：`node --test app/ui/*.test.js` = **83/83**（md + undo，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
 
 ## 2. 应用层逐函数对照
 

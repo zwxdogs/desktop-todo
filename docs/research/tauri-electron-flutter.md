@@ -1,5 +1,7 @@
 # Tauri 2 / Electron / Flutter：Windows 桌面待办应用选型调研
 
+> _文中引用的 `todo.pyw` 与行号对应 0.2.6/0.2.7 的 Tk 源码，该文件已于 2026-11 从仓库删除（[ADR 0006](../../docs/adr/0006-remove-tk-fallback.md)）；需要原物时从 git 历史取。_
+
 - 调研日期：2026-11-12
 - 对象：`E:\项目\desktop-todo\todo.pyw`（v0.2.6，约 1,594 行 Python 3.12 + Tkinter，PyInstaller onedir）
 - 问题：三者之中，谁能在「更高性能 / 更小占用 / 更方便开发」上领先？——不是单选，按三条轴分别回答。

@@ -65,17 +65,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 
 ## 配置
 
-复制 `config.example.json` 为 `config.json`：
+`config.json` 由程序自动维护（首次运行、换文件、移动窗口后写回），平时不用手改：
 
 ```json
 { "file": "待办.md", "docked": true }
 ```
 
-`file` 为相对路径时按程序目录解析；窗口位置和大小会写回 `config.json`（物理像素，格式与 0.2.7 相同）。该文件属于本机运行时状态，已在 `.gitignore` 中排除。
+想换清单文件就点顶栏「更换文件…」，或往程序目录放一个 `待办.md`。`file` 为相对路径时按程序目录解析；窗口位置和大小也写在同一个文件里（物理像素，格式与 0.2.7 相同）。该文件属于本机运行时状态，已在 `.gitignore` 中排除。
 
 ## 环境
 
 - Windows 10/11 + WebView2 Runtime
 - 构建：Rust stable（cargo）
 - 测试：Node.js（`node --test`）
-- 回退：Tk 0.2.7 源码 `todo.pyw` 与 `build.ps1` 仍在仓库中，可单独构建（见 ADR 0003）
+- 回退：Tk 0.2.7 的源码已从仓库删除（见 [ADR 0006](docs/adr/0006-remove-tk-fallback.md)），需要时从 git 历史取；只想要可运行的老版本就用 Releases 里的 `DesktopTodo-0.2.7-win64.zip`

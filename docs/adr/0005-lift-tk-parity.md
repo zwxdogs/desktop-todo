@@ -5,6 +5,8 @@ date: 2026-11-13
 
 # 解除「功能与 Tk 0.2.7 完全一致」的对等约束
 
+> _本文末条「回退路径不变」已被 [ADR-0006](0006-remove-tk-fallback.md) 取代：`todo.pyw` 与根 `build.ps1` 已从仓库删除，回退改由 git 历史与 GitHub Releases 承担。_
+
 [ADR-0003](0003-migrate-to-tauri2.md) 换栈时用户给了两条硬约束：① 迁移后功能与 0.2.7 完全一致，不增不减；② 测试验证，不留 bug。`app/PARITY.md` 就是按约束 ① 建的验收表——逐函数对照 `todo.pyw`（0.2.7）与本实现，任何差异都要立项。
 
 0.3.0 换栈、0.4.0 拖动排序、[ADR-0004](0004-pin-means-docked.md) 把 📌 改成「固定在桌面 / 普通窗口」之后，Tauri 2 已经全面接管，Tk 版冻结为回退路径（`todo.pyw` + 根目录 `build.ps1` 留在仓库里，不再构建部署）。
