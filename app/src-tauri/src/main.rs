@@ -295,6 +295,12 @@ fn write_config(app: &AppHandle) {
     let (file, docked) = {
         let st = app.state::<Mutex<Shared>>();
         let s = st.lock().unwrap();
+        // 测试模式从不读 config.json（见 setup 里 testing 分支），写它只有一个后果：
+        // 跑一次探针就把用户真实部署的配置改成测试文件。之前实测时就这样踩过一次。
+        if s.testing {
+            s.log("test mode: config.json not written");
+            return;
+        }
         (s.file.to_string_lossy().into_owned(), s.docked)
     };
     let Some(win) = app.get_webview_window("main") else { return };
