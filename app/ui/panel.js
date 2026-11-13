@@ -484,9 +484,10 @@ function showMenu(items, x, y) {
   menuEl.style.top = `${Math.max(0, Math.min(y, window.innerHeight - rect.height - 2))}px`;
 }
 function hideMenu() { menuEl.style.display = 'none'; }
+// 与主窗口一致用捕获阶段：拖动区处理在 document 冒泡期吞掉事件（#4；本窗口暂无拖动区，防复制粘贴）
 document.addEventListener('mousedown', (e) => {
   if (!menuEl.contains(e.target)) hideMenu();
-});
+}, true);
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 /* ---------- 顶栏 ---------- */

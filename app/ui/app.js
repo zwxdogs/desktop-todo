@@ -453,7 +453,9 @@ function panelSyncAnchor(i) {
   }
 }
 
-/* 点击编辑框以外的地方即结束编辑（todo.pyw:912-925） */
+/* 点击编辑框以外的地方即结束编辑（todo.pyw:912-925）
+   捕获阶段：Tauri 注入的拖动区处理在 document 冒泡期 preventDefault + stopImmediatePropagation，
+   冒泡监听收不到、preventDefault 还让输入框不 blur，点标题栏就提交不了（#4） */
 document.addEventListener('mousedown', (e) => {
   const editing = S.edit || S.panelEditing;
   if (!editing) return;
@@ -462,7 +464,7 @@ document.addEventListener('mousedown', (e) => {
     if (S.edit) commitEdit();
     if (S.panelEditing) emitTo('panel', 'panel-commit', {});
   }, 0);
-});
+}, true);
 
 /* ---------- 插入/删除/分组（todo.pyw:927-997） ---------- */
 
@@ -1143,10 +1145,10 @@ function bindChrome() {
     e.stopPropagation();
     cleanupDrag();
   }, true);
-  // 点击菜单外关闭
+  // 点击菜单外关闭（捕获阶段：理由同上，冒泡期会被拖动区处理吞掉，#4）
   document.addEventListener('mousedown', (e) => {
     if (!menuEl.contains(e.target)) hideMenu();
-  });
+  }, true);
 }
 
 /* ---------- 启动 ---------- */
