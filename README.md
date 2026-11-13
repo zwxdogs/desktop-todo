@@ -78,4 +78,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 - Windows 10/11 + WebView2 Runtime
 - 构建：Rust stable（cargo）
 - 测试：Node.js（`node --test`）
-- 回退：Tk 0.2.7 的源码已从仓库删除（见 [ADR 0006](docs/adr/0006-remove-tk-fallback.md)），需要时从 git 历史取；只想要可运行的老版本就用 Releases 里的 `DesktopTodo-0.2.7-win64.zip`
+- 回退：Tk 0.2.7 的源码已从仓库删除（见 [ADR 0006](docs/adr/0006-remove-tk-fallback.md)），需要时从 git 历史取；只想要可运行的老版本就用 Releases 里的 Tk 版（最后发布的是 `DesktopTodo-0.2.4-win64.zip`）

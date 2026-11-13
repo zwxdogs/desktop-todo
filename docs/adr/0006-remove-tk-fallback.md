@@ -11,7 +11,7 @@ date: 2026-11-13
 
 - Tauri 2 自 0.3.0 起接管，0.4.0 已发版；Tk 版最后一次改动是 2026-11-12 的 0.2.7，此后没有一行新代码。
 - 回退路径是四个文件互相引用的打包链：根 `build.ps1` → `DesktopTodo.spec` → `todo.pyw` / `gen_icon.py` / `packaging/gen_version_info.py`，再加上 `assets/app.ico` 与 `config.example.json`。它不参与 Tauri 的构建、测试、部署，却要跟每一处"回退路径仍在"的文档措辞一起维护。
-- 「回退」真正发生时的两条替代路径都还在：git 历史里删除前的提交能取回全部源码，GitHub Releases 上的 `DesktopTodo-0.2.7-win64.zip` 能直接给用户可运行的程序。
+- 「回退」真正发生时的两条替代路径都还在：git 历史里删除前的提交能取回全部源码，GitHub Releases 上的 Tk 版资产（最后发布的是 `DesktopTodo-0.2.4-win64.zip`）能直接给用户可运行的程序。
 
 ## Decision
 
