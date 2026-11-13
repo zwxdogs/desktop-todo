@@ -16,11 +16,14 @@
     <button class="hbtn" id="btn-choose" title="更换文件…"></button>
     <button class="hbtn" id="btn-reveal" title="打开文件位置"></button>
     <span id="hdr-sep" aria-hidden="true"></span>
-    <!-- 按钮顺序对齐 Tk pack(side=right)：✕ 最右，↻、📌、＋ 依次向左 -->
-    <button class="hbtn" id="btn-add" title="在末尾添加待办">＋</button>
-    <button class="hbtn" id="btn-pin" title="固定在桌面 / 普通窗口">📌</button>
-    <button class="hbtn" id="btn-refresh" title="从磁盘刷新">↻</button>
-    <button class="hbtn" id="btn-close" title="退出">✕</button>
+    <!-- 六个按钮的内脏全由 app.js 注入内联 SVG（ICON_* 常量）：同一套 13px 画布、
+         同一套线宽，六枚图标才可能逐像素对齐；用字体字形时 ＋（14pt）、📌（9pt）、
+         ↻（13pt）各自墨迹中心不同，横竖都错位。按钮顺序对齐 Tk pack(side=right)：
+         ✕ 最右，↻、📌、＋ 依次向左。 -->
+    <button class="hbtn" id="btn-add" title="在末尾添加待办"></button>
+    <button class="hbtn" id="btn-pin" title="固定在桌面 / 普通窗口"></button>
+    <button class="hbtn" id="btn-refresh" title="从磁盘刷新"></button>
+    <button class="hbtn" id="btn-close" title="退出"></button>
   </header>
   <div id="list"></div>
   <div id="grip" title="">

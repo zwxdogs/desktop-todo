@@ -1083,10 +1083,13 @@ async function exitApp() {
 
 /* ---------- 顶栏/把手绑定 ---------- */
 
-/* 顶栏图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：viewBox 13 与显示尺寸 1:1，
-   坐标落在 .5 上，1px 线才不发虚。13px 画在 .hbtn 的 30×26 热区正中。
+/* 顶栏六个图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：同一个 13px 画布、
+   .5 坐标、1px 线，六枚才逐像素对齐。以前 ＋ 📌 ↻ ✕ 用字体字形（14pt / 9pt /
+   13pt / 12pt），字号与基线各不相同，顶栏里横竖都错位。
    更换文件 = 纯文档页（矩形 + 右上折角），不叠箭头 —— 13px 下两笔会糊；
-   打开文件位置 = ↗，与资源管理器“在文件夹中显示”同义。 */
+   打开文件位置 = ↗，与资源管理器“在文件夹中显示”同义；↻ = 圆形箭头，
+   📌 = 24 画布的图钉。后两枚借 24 画布现成路径，线宽 2 随 13/24 缩放成 ~1.1px，
+   与其余 1px 线同重。 */
 const ICON_CHOOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M2.5 1.5H7.5L10.5 4.5V11.5H2.5Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
   + '<path d="M7.5 1.5V4.5H10.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
@@ -1094,6 +1097,20 @@ const ICON_CHOOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
 const ICON_REVEAL_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M3.5 9.5L9.5 3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
   + '<path d="M6.5 3.5H9.5V6.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '</svg>';
+const ICON_ADD_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M6.5 2.5V10.5M2.5 6.5H10.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+  + '</svg>';
+const ICON_CLOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M3.2 3.2L9.8 9.8M9.8 3.2L3.2 9.8" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+  + '</svg>';
+const ICON_REFRESH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+  + '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>'
+  + '<path d="M21 3v5h-5"/>'
+  + '</svg>';
+const ICON_PIN_SVG = '<svg viewBox="0 0 24 24" fill="none">'
+  + '<path d="M12 17v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
+  + '<path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
   + '</svg>';
 
 function bindChrome() {
@@ -1108,6 +1125,12 @@ function bindChrome() {
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
   $('btn-choose').innerHTML = ICON_CHOOSE_SVG;
   $('btn-reveal').innerHTML = ICON_REVEAL_SVG;
+  // 其余四枚也走同一套注入：HTML 里只留空按钮，图标只在 app.js 有一份定义。
+  const ICONS = {
+    'btn-add': ICON_ADD_SVG, 'btn-pin': ICON_PIN_SVG,
+    'btn-refresh': ICON_REFRESH_SVG, 'btn-close': ICON_CLOSE_SVG,
+  };
+  for (const [id, svg] of Object.entries(ICONS)) $(id).innerHTML = svg;
   // Tk 按钮按下不夺焦点（Canvas 无焦点），防止空格键误触
   for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-add', 'btn-choose', 'btn-reveal']) {
     $(id).addEventListener('mousedown', (e) => e.preventDefault());

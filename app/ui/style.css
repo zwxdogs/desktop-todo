@@ -57,39 +57,33 @@ body::-webkit-scrollbar { display: none; }
   border: none;
   background: transparent;
   color: #5A6472;
-  /* Segoe UI Symbol 优先：📌 走单色图钉字形（对齐 Tk 字符渲染），＋✕↻ 回落 YaHei */
-  font-family: "Segoe UI Symbol", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  font-size: 12pt;
-  line-height: 1;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   cursor: pointer;
-  transform: translateY(-0.5px);  /* Tk 墨迹中心 -1 物理像素的等效 */
 }
 .hbtn.lit { background: #DCE9FA; color: #4A8FE2; }
 .hbtn:hover { background: #E3E8EF; color: #24292F; }
 .hbtn:active { background: #D7DEE7; color: #24292F; }
-#btn-refresh { font-size: 13pt; }
-#btn-pin { font-size: 9pt; }
-#btn-add { font-size: 14pt; }
 #btn-close { margin-right: 6px; }
 
-/* 顶栏图标按钮：内联单色 SVG（与 GRIP_SVG/boxSvg 同风格，currentColor 随 hover 变色）。
-   13px 画在 .hbtn 的 30×26 热区正中；文档页图标不叠箭头——13px 下两笔会糊成一团。 */
+/* 顶栏六个图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
+   全部 13px 画布、flex 居中：对齐靠同一个几何框，不靠字体字形的基线与墨迹中心
+   —— 之前 ＋ 用 14pt、📌 9pt、↻ 13pt，字号不同还各自带基线偏移，横竖都错位。 */
 .hbtn svg { width: 13px; height: 13px; display: block; }
 
 /* 分组竖线：[更换文件][打开文件位置] | ＋ 📌 ↻ ✕
    pointer-events:none 是硬要求：它是 <span>，没有 data-tauri-drag-region，
    不穿透就在按钮之间留一块 9px 死区（既点不到按钮，也拖不动窗口）；
-   穿透后命中 #hdr，等同点标题栏空白，可以拖窗口。 */
+   穿透后命中 #hdr，等同点标题栏空白，可以拖窗口。
+   颜色比顶栏下沿的发丝线（#DFE4EA）深一档：同色在 #EDF0F4 上几乎看不见。 */
 #hdr-sep {
   flex-shrink: 0;
   width: 1px;
-  height: 16px;
+  height: 18px;
   margin: 0 4px;
-  background: #DFE4EA;
+  background: #AFBAC7;
   pointer-events: none;
 }
 
