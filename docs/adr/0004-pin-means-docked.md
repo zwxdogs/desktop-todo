@@ -24,7 +24,7 @@ date: 2026-11-13
 
 ## Consequences
 
-- `app/src-tauri/src/main.rs`：`set_docked` 收敛为 `set_docked_state`（落状态 → `apply_docked` → 同步托盘勾选 → 存盘 → 广播 `dock-changed`）；`dock_style(docked)` 是纯函数（`always_on_bottom` / `always_on_top` / `toolwindow` / `appwindow` / `skip_taskbar` 五个开关），配 `cargo test` 三条断言守住「两种模式都不 topmost」。`WS_EX_APPWINDOW` 必须一起清：tao 建窗时给了它，两者并存时它会盖过 `WS_EX_TOOLWINDOW` 把任务栏按钮撑回来。
+- `app/src-tauri/src/main.rs`：`set_docked` 收敛为 `set_docked_state`（落状态 → 落窗口样式 → 同步托盘勾选 → 存盘 → 广播 `dock-changed`）；`dock_style(docked)` 是纯函数（`always_on_bottom` / `always_on_top` / `toolwindow` / `skip_taskbar` 四个开关），配 `cargo test` 守住「两种模式都不 topmost」。`WS_EX_APPWINDOW` 由 `set_ex_flags` 与 `WS_EX_TOOLWINDOW` 互斥维护：tao 建窗时给了 APPWINDOW，两者并存时它会盖过 TOOLWINDOW 把任务栏按钮撑回来。
 - 固定在桌面 = `WS_EX_TOOLWINDOW`（挡 Alt+Tab 与任务栏按钮重生）+ `ITaskbarList::DeleteTab`（拿掉已有按钮）+ `pin_bottom`；普通窗口 = 清掉这四样，其中清 `ALWAYS_ON_BOTTOM` 必须在其它 `SetWindowPos` 之前（tao 的 `WM_WINDOWPOSCHANGING` 会把它改写成 `HWND_BOTTOM`）。
 - 样式必须**在窗口显示之后**再落一遍：首次 `ShowWindow` 会按建窗时的 exstyle 重算一遍，显示前设的 `TOOLWINDOW` 会被抹掉（实测：显示前设的被覆盖，显示后设的稳定）。所以启动序列是「落样式 → `show()` → 再落一次样式」，面板 `panel_open` 同理。
 - 托盘菜单项的 `set_checked` 走 `run_on_main_thread` 并阻塞等待，在主线程（命令/托盘回调）里调用会死锁，因此所有托盘动作都丢到独立线程执行。

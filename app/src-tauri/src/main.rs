@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WindowEvent, Wry,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WindowEvent,
 };
 
 // ---------------- Win32 FFI ----------------
@@ -31,6 +31,10 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AudioServiceSandbox --no-sandbox --disable-gpu-sandbox";
 const MUTEX_NAME: &str = "Zwx_DesktopTodoWidget_Mutex";
 const APP_NAME: &str = "桌面待办";
+// 托盘菜单项 id（菜单构建与事件匹配共用，避免字符串两处各写一遍）
+const TRAY_SHOW: &str = "tray-show";
+const TRAY_DOCK: &str = "tray-dock";
+const TRAY_QUIT: &str = "tray-quit";
 
 #[link(name = "user32")]
 extern "system" {
@@ -111,9 +115,9 @@ impl Shared {
     }
 }
 
-// 托盘菜单项的句柄（勾选态要跟着模式走）
+// 托盘勾选态的同步通道（由常驻线程消费，见 sync_tray_check）
 struct TrayState {
-    dock_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    check_tx: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
 }
 
 // ---------------- 贴桌面 Win32（与 todo.pyw send_above_desktop 一致） ----------------
@@ -159,14 +163,17 @@ fn at_desktop_level(hwnd: isize) -> bool {
     pm != 0 && unsafe { GetWindow(pm, GW_HWNDPREV) } == hwnd
 }
 
-// WS_EX_TOOLWINDOW / WS_EX_APPWINDOW 开关。主窗口固定在桌面时要同时「进 TOOLWINDOW」并「出 APPWINDOW」
-// ——创建时 tao 给了 WS_EX_APPWINDOW，两者并存时 APPWINDOW 会把任务栏按钮撑回来。
+// WS_EX_TOOLWINDOW / WS_EX_APPWINDOW 是一对互斥语义：toolwindow=true 就同时清掉 APPWINDOW。
+// 必须两个一起处理——创建时 tao 给了 WS_EX_APPWINDOW，两者并存时它会盖过 TOOLWINDOW 把任务栏按钮撑回来。
 // 样式改动后必须 SetWindowPos(SWP_FRAMECHANGED) 才会被 shell 采纳。
-fn set_ex_flags(hwnd: isize, toolwindow: bool, appwindow: bool) {
+fn set_ex_flags(hwnd: isize, toolwindow: bool) {
     unsafe {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let mut next = if toolwindow { ex | WS_EX_TOOLWINDOW } else { ex & !WS_EX_TOOLWINDOW };
-        next = if appwindow { next | WS_EX_APPWINDOW } else { next & !WS_EX_APPWINDOW };
+        let next = if toolwindow {
+            (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW
+        } else {
+            (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        };
         if next != ex {
             SetWindowLongW(hwnd, GWL_EXSTYLE, next);
             SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
@@ -182,16 +189,20 @@ struct DockStyle {
     always_on_bottom: bool,
     always_on_top: bool,
     toolwindow: bool,
-    appwindow: bool,
     skip_taskbar: bool,
 }
 
 fn dock_style(docked: bool) -> DockStyle {
     if docked {
-        DockStyle { always_on_bottom: true, always_on_top: false, toolwindow: true, appwindow: false, skip_taskbar: true }
+        DockStyle { always_on_bottom: true, always_on_top: false, toolwindow: true, skip_taskbar: true }
     } else {
-        DockStyle { always_on_bottom: false, always_on_top: false, toolwindow: false, appwindow: true, skip_taskbar: false }
+        DockStyle { always_on_bottom: false, always_on_top: false, toolwindow: false, skip_taskbar: false }
     }
+}
+
+// 窗口 HWND（Win32 结构字段要 isize；x64 上句柄就是整数值）。
+fn win_hwnd(win: &WebviewWindow) -> Option<isize> {
+    win.hwnd().ok().map(|h| h.0 as isize)
 }
 
 // 把 dock_style 落到窗口上。顺序有讲究：
@@ -200,13 +211,13 @@ fn dock_style(docked: bool) -> DockStyle {
 // 2) TOOLWINDOW 的 FRAMECHANGED 那一下会把窗口提到最前；固定在桌面时后面再用 pin_bottom 压回去。
 fn apply_docked(win: &WebviewWindow, docked: bool) {
     let style = dock_style(docked);
-    let hwnd = win.hwnd().ok().map(|h| h.0 as isize);
+    let hwnd = win_hwnd(win);
     if !style.always_on_bottom {
         let _ = win.set_always_on_bottom(false);
     }
     let _ = win.set_always_on_top(style.always_on_top);
     if let Some(h) = hwnd {
-        set_ex_flags(h, style.toolwindow, style.appwindow);
+        set_ex_flags(h, style.toolwindow);
     }
     // ITaskbarList::DeleteTab/AddTab：任务栏按钮的开关（TOOLWINDOW 只挡 Alt+Tab 与新建按钮）
     let _ = win.set_skip_taskbar(style.skip_taskbar);
@@ -222,15 +233,13 @@ fn is_docked(app: &AppHandle) -> bool {
     app.state::<Mutex<Shared>>().lock().unwrap().docked
 }
 
-// 托盘菜单里的「固定在桌面」勾选态 = 当前模式。set_checked 会 run_on_main_thread + 阻塞等待，
-// 在主线程（命令/托盘回调）里调用会死锁，所以始终丢给独立线程。
+// 托盘勾选态 = 当前模式。set_checked 会 run_on_main_thread + 阻塞等待，在主线程（命令/托盘回调）
+// 里调用会死锁，所以统一丢给一个常驻同步线程按到达顺序执行——每次新开线程的话，两次快速切换的
+// 落点顺序不保证，勾选态可能永久反着。
 fn sync_tray_check(app: &AppHandle) {
     let docked = is_docked(app);
-    let item = app.state::<TrayState>().dock_item.lock().unwrap().clone();
-    if let Some(item) = item {
-        std::thread::spawn(move || {
-            let _ = item.set_checked(docked);
-        });
+    if let Some(tx) = app.state::<TrayState>().check_tx.lock().unwrap().as_ref() {
+        let _ = tx.send(docked);
     }
 }
 
@@ -429,8 +438,21 @@ fn save_config(app: AppHandle) {
 // 切换两态的唯一入口（命令、托盘、启动都走这里）：落状态 → 落窗口样式 → 同步托盘勾选 → 存盘。
 // 注意：本函数会在主线程被调用（tauri 同步命令跑在主线程），所以内部不许有阻塞主线程的调用。
 fn set_docked_state(app: &AppHandle, docked: bool) {
-    app.state::<Mutex<Shared>>().lock().unwrap().docked = docked;
+    let changed = {
+        let st = app.state::<Mutex<Shared>>();
+        let mut s = st.lock().unwrap();
+        let changed = s.docked != docked;
+        s.docked = docked;
+        changed
+    };
     if let Some(win) = app.get_webview_window("main") {
+        if changed {
+            // 切模式时让 shell 重算任务栏与 Alt+Tab 归属：隐藏 → 落样式 → 显示 → 再落一次。
+            // 用户接受这一下闪烁（ADR 0004）；首次 ShowWindow 会按建窗时样式覆盖 exstyle。
+            let _ = win.hide();
+            apply_docked(&win, docked);
+            let _ = win.show();
+        }
         apply_docked(&win, docked);
     }
     sync_tray_check(app);
@@ -456,13 +478,13 @@ fn show_main_window(app: &AppHandle) {
 
 fn on_tray_menu(app: &AppHandle, id: &str) {
     match id {
-        "tray-show" => show_main_window(app),
-        "tray-dock" => {
+        TRAY_SHOW => show_main_window(app),
+        TRAY_DOCK => {
             let next = !is_docked(app);
             set_docked_state(app, next);
         }
         // 与 Alt+F4 / 任务栏关闭同路径：交给 JS 提交编辑、写盘，再 exit_app
-        "tray-quit" => {
+        TRAY_QUIT => {
             let _ = app.emit("app-exit-request", ());
         }
         _ => {}
@@ -484,7 +506,7 @@ fn resize_start(window: tauri::Window) {
 // config 落盘；返回文件状态供 JS 决定是否重载。
 #[tauri::command]
 fn poll_tick(app: AppHandle, win: WebviewWindow) -> Option<FileState> {
-    let hwnd = win.hwnd().ok().map(|h| h.0 as isize);
+    let hwnd = win_hwnd(&win);
     let (docked, file) = {
         let s = app.state::<Mutex<Shared>>();
         let s = s.lock().unwrap();
@@ -507,7 +529,7 @@ fn poll_tick(app: AppHandle, win: WebviewWindow) -> Option<FileState> {
     // 面板 WS_EX_TOPMOST 被系统剥除时兜底自愈（Win32 位直读，Tk attributes 不可信的同款绕行）
     if let Some(p) = app.get_webview_window("panel") {
         if p.is_visible().unwrap_or(false) {
-            if let Some(ph) = p.hwnd().ok().map(|h| h.0 as isize) {
+            if let Some(ph) = win_hwnd(&p) {
                 unsafe {
                     if GetWindowLongW(ph, GWL_EXSTYLE) & WS_EX_TOPMOST == 0 {
                         let _ = p.set_always_on_top(true);
@@ -556,8 +578,8 @@ fn panel_open(app: AppHandle, win: WebviewWindow) {
     let _ = p.show();
     // TOOLWINDOW 必须在「显示之后」落：首次 ShowWindow 会按建窗时的样式重算 exstyle，
     // 显示前设的 TOOLWINDOW 会被抹掉（实测，ADR 0004）。
-    if let Some(h) = p.hwnd().ok().map(|h| h.0 as isize) {
-        set_ex_flags(h, true, false);
+    if let Some(h) = win_hwnd(&p) {
+        set_ex_flags(h, true);
     }
     let _ = p.set_focus();
     app.state::<Mutex<Shared>>().lock().unwrap().log("panel open");
@@ -780,9 +802,9 @@ fn main() {
             }
 
             // 初始两态（ADR 0004）：先把样式落好再显示，任务栏按钮才按对的模式出现
-            app.manage(TrayState { dock_item: Mutex::new(None) });
+            app.manage(TrayState { check_tx: Mutex::new(None) });
             apply_docked(&win, initial_dock);
-            let hwnd = win.hwnd().ok().map(|h| h.0 as isize).unwrap_or(-1);
+            let hwnd = win_hwnd(&win).unwrap_or(-1);
             let mode = if initial_dock { "desktop mode" } else { "normal window" };
             app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("{}: hwnd={}", mode, hwnd));
             win.show()?;
@@ -791,13 +813,27 @@ fn main() {
             apply_docked(&win, initial_dock);
 
             // 托盘：两种模式下都在。固定在桌面时任务栏没有图标，托盘就是唤回主窗口的入口。
-            let show_item = MenuItem::with_id(app, "tray-show", "显示待办", true, None::<&str>)?;
-            let dock_item = CheckMenuItem::with_id(app, "tray-dock", "固定在桌面", true, initial_dock, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, TRAY_SHOW, "显示待办", true, None::<&str>)?;
+            let dock_item = CheckMenuItem::with_id(app, TRAY_DOCK, "固定在桌面", true, initial_dock, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, TRAY_QUIT, "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &dock_item, &sep, &quit_item])?;
-            // 句柄先登记，再建图标：建完立刻可能被按钮/命令触发 sync_tray_check
-            *app.state::<TrayState>().dock_item.lock().unwrap() = Some(dock_item);
+            // 勾选态同步：先登记通道再建图标（建完立刻可能被按钮/命令触发 sync_tray_check），
+            // 由常驻线程按顺序取最新值落 set_checked——它阻塞，不能碰主线程。
+            let (check_tx, check_rx) = std::sync::mpsc::channel::<bool>();
+            *app.state::<TrayState>().check_tx.lock().unwrap() = Some(check_tx);
+            {
+                let item = dock_item.clone();
+                std::thread::spawn(move || {
+                    while let Ok(first) = check_rx.recv() {
+                        let mut latest = first;
+                        while let Ok(next) = check_rx.try_recv() {
+                            latest = next;
+                        }
+                        let _ = item.set_checked(latest);
+                    }
+                });
+            }
             let mut tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip(APP_NAME)
                 .menu(&menu)
@@ -814,18 +850,11 @@ fn main() {
                         std::thread::spawn(move || show_main_window(&app));
                     }
                 });
-            // 托盘位图 = exe 内嵌的应用图标（tauri 在 Windows 上从图标资源解码，免开 image-png）。
-            // 万一资源没打进去，退回 32×32 纯色块——托盘位必须在，否则固定在桌面时没有唤回入口。
-            match app.default_window_icon().cloned() {
-                Some(icon) => tray = tray.icon(icon),
-                None => {
-                    app.state::<Mutex<Shared>>()
-                        .lock()
-                        .unwrap()
-                        .log("tray: no embedded app icon resource, using solid fallback");
-                    let rgba = [0x4Au8, 0x8F, 0xE2, 0xFF].repeat(32 * 32);
-                    tray = tray.icon(tauri::image::Image::new_owned(rgba, 32, 32));
-                }
+            // 托盘位图 = exe 内嵌的应用图标（tauri 在 Windows 上从图标资源解码，免开 image-png）
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            } else {
+                app.state::<Mutex<Shared>>().lock().unwrap().log("tray: no embedded app icon resource");
             }
             tray.build(app)?;
 
@@ -845,8 +874,8 @@ fn main() {
             };
             let panel = panel.additional_browser_args(BROWSER_ARGS).build()?;
             panel.hide()?;
-            if let Some(h) = panel.hwnd().ok().map(|h| h.0 as isize) {
-                set_ex_flags(h, true, false);
+            if let Some(h) = win_hwnd(&panel) {
+                set_ex_flags(h, true);
             }
             let _ = panel.set_always_on_top(true);
 
@@ -896,8 +925,7 @@ mod dock_style_tests {
     fn docked_mode_pins_above_desktop_without_taskbar() {
         let s = dock_style(true);
         assert!(s.always_on_bottom, "固定在桌面 = 压到桌面图标之上");
-        assert!(s.toolwindow, "固定在桌面时要从任务栏和 Alt+Tab 里消失");
-        assert!(!s.appwindow, "APPWINDOW 会盖过 TOOLWINDOW 把任务栏按钮撑回来");
+        assert!(s.toolwindow, "固定在桌面时要从任务栏和 Alt+Tab 里消失（APPWINDOW 由 set_ex_flags 一起清）");
         assert!(s.skip_taskbar);
     }
 
@@ -905,8 +933,7 @@ mod dock_style_tests {
     fn normal_mode_is_a_plain_window() {
         let s = dock_style(false);
         assert!(!s.always_on_bottom);
-        assert!(!s.toolwindow, "普通窗口要进任务栏和 Alt+Tab");
-        assert!(s.appwindow, "恢复建窗时的 APPWINDOW");
+        assert!(!s.toolwindow, "普通窗口要进任务栏和 Alt+Tab（并恢复 APPWINDOW）");
         assert!(!s.skip_taskbar);
     }
 
