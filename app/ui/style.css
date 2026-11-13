@@ -63,9 +63,13 @@ body {
 .hbtn.lit { background: #DCE9FA; color: #4A8FE2; }
 .hbtn:hover { background: #E3E8EF; color: #24292F; }
 .hbtn:active { background: #D7DEE7; color: #24292F; }
+/* 删除已完成在没有可删项时置灰：位置不跳、能看见有这个能力，但点不动。
+   要压过 .hbtn:hover / :active 的背景，所以选择器带 :disabled。 */
+.hbtn:disabled { color: #C6CCD4; cursor: default; }
+.hbtn:disabled:hover, .hbtn:disabled:active { background: transparent; color: #C6CCD4; }
 #btn-close { margin-right: 6px; }
 
-/* 顶栏六个图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
+/* 顶栏七个图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
    全部 13px 画布、flex 居中：对齐靠同一个几何框，不靠字体字形的基线与墨迹中心
    —— 之前 ＋ 用 14pt、📌 9pt、↻ 13pt，字号不同还各自带基线偏移，横竖都错位。 */
 .hbtn svg { width: 13px; height: 13px; display: block; }
@@ -459,3 +463,29 @@ body.dragging .row:hover .badge { transform: none; }
 
 /* 面板行全部顶格 pad=12（Tk p_build_row） */
 #panel-body .row { --pad: 12px; }
+
+/* ---------- 批量删除的回执浮层 ----------
+   不弹确认框（用户拍板 Q4 A）：删完在窗口底部给一行，约 3 秒淡出，点它就撤销整批。
+   撤销的唯一入口本来只有 Ctrl+Z、还没有任何提示；浮层可点之后它第一次看得见摸得着。 */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;                 /* 让开右下角缩放把手与底部 28px 空白条 */
+  transform: translate(-50%, 6px);
+  max-width: calc(100% - 24px);
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #24292F;          /* 与标题文字同色，浮在灰底清单上才看得清 */
+  color: #FFFFFF;
+  font-size: 9pt;
+  line-height: 16px;
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;         /* 不可点时不挡清单上的右键 / 拖动 */
+  transition: opacity .16s ease, transform .16s ease;
+  z-index: 40;                  /* 低于右键菜单 */
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+#toast.clickable { pointer-events: auto; cursor: pointer; }
+#toast.clickable:hover { background: #3A4149; }
+#toast .toast-sub { color: #C6CCD4; font-size: 8.5pt; }

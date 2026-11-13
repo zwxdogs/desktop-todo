@@ -17,8 +17,9 @@
 | delete_subtree (236-254) | deleteSubtree | 等效 |
 | —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
 | —（0.4.1 新增） | groupTodoIndent / todoBelow | 行内加号的落点与缩进（纯函数，8 项 TDD） |
+| —（0.4.2 新增） | completedScan / deleteCompleted | 批量删除已完成：哪些块算「已完成」、整块删（纯函数，12 项 TDD，§3-15） |
 
-测试：`node --test app/ui/*.test.js` = **106/106**（md + 行内加号落点 + undo + 新建示例文案 + 滚动条几何，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
+测试：`node --test app/ui/*.test.js` = **118/118**（md + 行内加号落点 + 批量删除已完成 + undo + 新建示例文案 + 滚动条几何，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
 
 ## 2. 应用层逐函数对照
 
@@ -32,12 +33,13 @@
 | build_row(635) | app.js buildRow + style.css（pad=16+min(8u,160)；hover/整行） | 等效 |
 | draw_box(709) | app.js boxSvg（勾/白折线/2px 边） | 等效 |
 | badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移给行右缘的加号与把手让位，0.4.1 起让位 40px（§3-14） |
-| 顶栏 hbtn(398-478) | index.html .hbtn ×4 + CSS hover/press/lit | 等效；0.4.0 起另有 2 个 SVG 图标按钮（更换文件 / 打开文件位置，§3-10） |
+| 顶栏 hbtn(398-478) | index.html .hbtn（0.4.2 起 7 枚）+ CSS hover/press/lit/disabled | 等效；0.4.0 起另有 2 个 SVG 图标按钮（更换文件 / 打开文件位置，§3-10），0.4.2 起再加「删除已完成」（§3-15） |
 | grip(495) | index.html #grip SVG 3 斜线 + hover 变色 | 等效 |
 | edit_row(835) | app.js editRow（Entry→input；不 trim、空照写；Esc/Enter/blur 同语义） | 等效 |
 | toggle_line(827) | app.js（box click → toggle → render → save） | 等效 |
 | insert_line(927) | app.js insertLine（ref=pos??i；nl 补行；30ms 后聚焦新行） | 等效 |
 | delete_line(945) | app.js deleteLine（子块连删；面板命中→关面板） | 等效 |
+| —（0.4.2 新增） | app.js deleteCompletedTodos + 顶栏 🗑 + 回执浮层 | 批量删除已完成（一行都不勾确认框、整批一个撤销快照，§3-15） | 新增 |
 | add_todo_end(969) | **已删除**（添加待办改为行右缘的加号，§3-14） | 取消 |
 | group_block_end/insert_group(981-997) | app.js insertGroup（nl 补在 pos-1；插入 pos；30ms 编辑） | 等效 |
 | push_undo/undo(1000-1023) | undo.js + app.js undo（编辑中忽略；栈顶同跳过；cap 50） | 等效 |
@@ -84,6 +86,8 @@
 13. **自绘滚动条（0.4.1 新增，Tk 0.2.7 没有）**：Tk 0.2.7 只认滚轮，界面上没有任何滚动条；0.4.0 沿用了原生条，它贯穿整条右缘（连标题栏一起）且常显。0.4.1 起 `body` 不再滚动、`#list` 自己滚（标题栏固定 34px，滚轮落在标题栏上不影响内容），主窗口与面板两栏各挂一条 6px 浮层拇指（`app/ui/scrollbar.js`）：滚动淡入 120ms、停手 900ms 后淡出 350ms、悬停与拖动加深、可拖动、鼠标停在拇指上不淡出，不滚时完全不可见——比 0.2.7 多出"看得见也能拖"这一层能力（用户 2026-11-13 定稿，原话："不需要键盘能操作，只需要鼠标可以操作就行"）。原生条改为在各滚动容器上藏掉（此前 `scrollbar-width:none` 挂在 `body` 上，Chromium 只认滚动容器自己，等于从没生效）。`prefers-reduced-motion` 时不做淡入淡出、直接显隐。拇指几何统一走纯函数 `thumbLayout()`（8 项单测），DOM 侧的淡入淡出与拖动没有可测接缝，靠实机手验。已知重叠：拇指占右缘 3–9px，与行右缘的拖动把手（右缘 2–20px）最外 6px 重叠——拇指可见时那 6px 先归拇指（能拖滚动条），把手还剩左侧 12px 可抓，两者不互相打死。
 14. **加待办改成行右缘的悬停加号（0.4.1 新增，[ADR 0007](../docs/adr/0007-inline-add-plus.md)）**：Tk 0.2.7 有三条加待办入口——行菜单「在下方插入待办」、分组菜单「在此分组添加待办」、空白菜单「在末尾添加待办」；三处全删，`addTodoEnd` 连函数一起删。改成鼠标悬停在待办或分组标题上时、在拖动把手左侧 22px 露出一个 12px 加号（`app/ui/plus.js` 的 `plusButton`，两窗共用），点它就在该条目下方一行插入一条待办并进内联编辑：待办落在整棵子块之后（`md.todoBelow` → `subtreeEnd-1`），分组标题取组内第一条待办的缩进（`md.groupTodoIndent`，先撞空行或下一个组头就顶格），两个落点都是纯函数、8 项单测。加号上右键等同该行右键。详情面板两栏的行同样有加号（插子待办/插备注，同样落在整棵子块之后），点击前先 `commitPending` 提交未完成的编辑；底部那两个「＋ 添加子待办 / ＋ 添加备注」保留（空栏时是唯一入口），同样先提交。行内编辑中该行藏起加号与把手（`editing` class 由 `dropEditor` 统一撤），拖动中（`body.dragging`）全局藏起加号；加号 `mousedown` 一律 `preventDefault`，否则"正在编辑另一行时点加号"会先被 blur 提交+重渲染吞掉这次点击。空白菜单只剩「在末尾添加分组」，文件缺失时该项置灰（`showMenu` 新增 `disabled`：灰字、点击吞掉且菜单不关）；退出只剩顶栏 ✕。空清单（没有任何可见行，含只有空行或只有被隐藏的顶格备注）在离顶 44px 处显示灰字「右键空白处，添加分组」（`addEmptyHint` 按上方空行的 8px 间隙扣算，`pointer-events:none`）。为了让位，徽标悬停左移 20→40px，行文字右内边距 42→64px，分组标题 40→62px，标题上的加号 `right:28px`、把手 `right:8px`；菜单最小宽 160→120px。用户 2026-11-13 三轮裁决，原话："在每个待办或分组名的右边……鼠标移动到上面时显示出一个加号""空清单要通过灰色字体提示用户右键添加分组"。
 
+15. **批量删除已完成（0.4.2 新增，Tk 0.2.7 没有）**：顶栏第 4 枚图标（垃圾桶）一键删掉清单里所有已勾选的顶层待办，没有确认框。判定只看顶层待办**自己的**勾选：父项勾了就整块删（连它下面的子待办、备注），父项没勾时它下面勾掉的子待办**一律不动**；「顶层」按子块层级判而不是顶格判，所以分组里带缩进的待办照样算。整批只压**一个**撤销快照（浮在半空的面板编辑先落定，它自己压的快照在前），所以回执上点一下或 Ctrl+Z 一次就整批退回；回执在任何新撤销快照压栈时立刻收掉（否则窗口期内又勾了一条，点回执会撤掉那一条而不是整批），撤销本身也收掉它。删除走原有的 250ms 防抖保存与行保真。删完窗口底部出现 3 秒回执「已删除 N 条 · Ctrl+Z 撤销」，可点；块里带未勾选子待办时追加一行「其中 M 条待办下有未勾选的子待办」——不跳过这些块，只报数，这是用户 2026-11-13 明确的取舍（宁可整块删，也不留下半个父子关系）；讨论稿里这句原写作「未完成子项」，落地按 GLOSSARY 的禁用词改成「未勾选的子待办」。没有已完成项时图标置灰（`.hbtn:disabled`），title 退回「删除已完成」，有 N 条时 title 报「删除已完成（N）」；入口只此一枚，空白右键菜单不动（用户否决了加进右键菜单）。空掉的分组保留标题；正在编辑的行若落在被删块里随之丢弃（不提交打的字），否则先提交；详情面板指向被删待办则关面板（与单条删除同款）。同类产品对照见 `docs/research/bulk-clear-completed-patterns.md`（7 款里只有 Google Tasks 有一键命令，且都不提供撤销）。
+
 ## 4. 验证状态
 
 - [x] 纯函数 TDD 89/89（`node --test app/ui/*.test.js`，2026-11-13）
@@ -102,4 +106,5 @@
 - [x] ADR 0005 解除对等约束（2026-11-13）：本文件顶部改写角色、§3 补 #3/#4 两条偏离、§2 的 menu_title 与顶栏按钮行同步；0003 / 0004 / AGENTS.md 互相引用，仓库内不再有"必须与 0.2.7 完全一致"的表述
 - [x] 0.4.1 自绘滚动条（2026-11-13，[#10](https://github.com/zwxdogs/desktop-todo/issues/10)）：`node --test app/ui/*.test.js` 97/97（新增 `app/ui/scrollbar.test.js` 8 项拇指几何）、`node --check app/ui/app.js app/ui/panel.js app/ui/scrollbar.js`、`app\build.ps1` release 构建后部署重启。显隐与拖动没有可测接缝，验收走 WebView2 远程调试实机核对（`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，CDP `Runtime.evaluate` + `Input.dispatchMouseEvent`）：滚轮落标题栏 `#list.scrollTop` 保持 0；落清单则滚动且 `class="vscroll on show"`、`opacity` 60ms 内到 1、停手 1.2s 后回 0；鼠标停在拇指上 1.3s 仍为 1（不淡出）；按住拇指拖 32px → `scrollTop` 120→233（理论 32×414/117≈113.2，实测 113）、拖动中 `class` 含 `dragging`；把 `#list` 的 flex 改成 `0 0 200px` 后轨道 578→174、拇指 569→57，`ResizeObserver` 跟上。截图验收改用 CDP `Page.captureScreenshot`：`PrintWindow` + `PW_RENDERFULLCONTENT` 抓不到带 opacity 过渡的合成层，会把"条子明明在闪"拍成"什么都没有"，别再拿它判断显隐动画
 - [x] 0.4.0 ＋ = 新建待办文件（2026-11-13）：`node --test --test-isolation=none app/ui/*.test.js` 89/89（新增 `app/ui/starter.test.js` 6 项：示例行序、分组标题、备注缩进、逐行换行符、提示文案、"序号为 0 时不出现第 0 个"）、`node --check app/ui/app.js` / `app/ui/starter.js`、`cargo check --release` 通过，`app\build.ps1` release 构建后部署重启；DOM 接线没有可测接缝（现有测试全是纯函数），验收靠实机手测——缺文件时提示里的两个序号与顶栏图标顺序一致、点 ＋ 另存为建出的文件带示例、指到已存在文件时只打开不覆盖、缺失状态退出不落空文件且下次启动仍缺文件、示例里的父任务+备注在详情面板里能对上
-- [x] 0.4.1 加待办改行内加号（2026-11-13，[ADR 0007](../docs/adr/0007-inline-add-plus.md)）：`node --test app/ui/*.test.js` 106/106（新增 `app/ui/md.insert.test.js` 9 项：分组标题缩进、无子项待办、带子块插整块之后、组头后空行/组头/文件末尾顶格、子块尾空行不算块内、末行无换行、tab 与空格混用原样带回、note/other/blank/越界返回 null）、`node --check app/ui/app.js app/ui/panel.js app/ui/md.js app/ui/plus.js`、`app\build.ps1` release 构建后部署重启；DOM 侧的悬停显形、点击落点、提交时序没有可测接缝（现有测试全是纯函数），验收靠实机手测——悬停加号出现且与徽标不重叠、点加号新行落在整块下方并进编辑、拖动中与编辑中不露加号、空白菜单只剩加分组且缺文件时置灰、空清单灰字离顶约 44px、面板加号与底部「＋」点击前先提交在编辑的那一条
+- [x] 0.4.1 加待办改行内加号（2026-11-13，[ADR 0007](../docs/adr/0007-inline-add-plus.md)）：`node --test app/ui/*.test.js` 106/106（当时计数；新增 `app/ui/md.insert.test.js` 9 项：分组标题缩进、无子项待办、带子块插整块之后、组头后空行/组头/文件末尾顶格、子块尾空行不算块内、末行无换行、tab 与空格混用原样带回、note/other/blank/越界返回 null）、`node --check app/ui/app.js app/ui/panel.js app/ui/md.js app/ui/plus.js`、`app\build.ps1` release 构建后部署重启；DOM 侧的悬停显形、点击落点、提交时序没有可测接缝（现有测试全是纯函数），验收靠实机手测——悬停加号出现且与徽标不重叠、点加号新行落在整块下方并进编辑、拖动中与编辑中不露加号、空白菜单只剩加分组且缺文件时置灰、空清单灰字离顶约 44px、面板加号与底部「＋」点击前先提交在编辑的那一条
+- [ ] 0.4.2 批量删除已完成（2026-11-13）：`node --test app/ui/*.test.js` 118/118（新增 `app/ui/md.completed.test.js` 12 项：空清单/全未勾、单条、`[X]` 大写、父勾子未勾报 unfinished、父未勾子勾整块跳过、分组内缩进仍算顶层且标题不打断、tab 与空格混用、块尾空行不入块、未勾选块原样保留、行保真、无命中返回新数组、全勾选只剩分组标题）。等待实机验收——勾选若干条后点顶栏垃圾桶，确认条数回执与「其中 M 条…」第二行、点回执与 Ctrl+Z 都能整批退回、0 条时图标置灰且 title 无条数、编辑中点垃圾桶不丢文字且只需一次撤销、空分组保留标题

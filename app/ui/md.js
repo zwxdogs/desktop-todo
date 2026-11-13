@@ -103,6 +103,36 @@ export function subtreeStats(lines, i) {
   return [todos, done, notes];
 }
 
+// completedScan：主列表里可见的那一层待办（「顶层待办」）中已勾选的块。
+// 返回 [{ i, end, unfinished }]：i/end 是整块的 [起, 止)，unfinished 是块内未勾选的子待办数。
+// 父项没勾时整块跳过——它下面勾掉的子待办不算（用户拍板：只管父待办自己的勾选）。
+// 「顶层」按子块层级判，不按顶格判：分组里的待办带缩进也仍是顶层。
+export function completedScan(lines) {
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (ln.kind !== 'todo') { i += 1; continue; }
+    const end = subtreeEnd(lines, i);
+    if (ln.checked) {
+      const [todos, done] = subtreeStats(lines, i);
+      out.push({ i, end, unfinished: todos - done });
+    }
+    i = end;
+  }
+  return out;
+}
+
+// deleteCompleted：删掉 completedScan 报出的所有块，返回新数组（不动原数组）。
+// 没命中的行 raw 一字不动（行保真）：未勾选的待办连同它的子块、分组标题、备注、空行全都留下。
+export function deleteCompleted(lines) {
+  const kill = new Set();
+  for (const b of completedScan(lines)) {
+    for (let j = b.i; j < b.end; j += 1) kill.add(j);
+  }
+  return lines.filter((_, idx) => !kill.has(idx));
+}
+
 // deleteSubtree：删除待办及其子块，返回新数组（不动原数组）。
 export function deleteSubtree(lines, i) {
   const end = subtreeEnd(lines, i);

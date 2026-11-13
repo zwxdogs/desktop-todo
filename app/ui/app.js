@@ -124,9 +124,13 @@ function basename(p) {
 
 /* ---------- 撤销（todo.pyw:1000-1023） ---------- */
 
-function pushUndo() { S.undoStack.push(md.serialize(S.lines)); }
+function pushUndo() {
+  S.undoStack.push(md.serialize(S.lines));
+  hideToast();   // 回执只认「刚删完」那一刻：别的动作一旦压栈，它就可能撤错东西，直接收掉
+}
 
 async function undo() {
+  hideToast();
   if (S.edit || S.panelEditing || !S.undoStack.canUndo()) return;
   const snap = S.undoStack.undo();
   const ok = await writeText(snap);
@@ -176,6 +180,7 @@ function showMissing() {
   div.className = 'missing';
   div.textContent = missingHint(btnIdx('btn-new'), btnIdx('btn-choose'));
   listEl.appendChild(div);
+  updateClearButton();   // 没有清单可删，按钮得跟着置灰
 }
 
 async function loadFile() {
@@ -305,6 +310,7 @@ function renderList(focusIdx) {
   if (!shown && S.loaded) addEmptyHint();
   sc.scrollTop = frac * (sc.scrollHeight - sc.clientHeight);
   if (mainScroll) mainScroll.refresh();  // 行数变了：拇指长度要重算（静默，不闪）
+  updateClearButton();                  // 顶部「删除已完成」的置灰与条数跟着清单走
   refreshPanel(focusIdx);              // 主列表是清单渲染的唯一出口
 }
 
@@ -547,6 +553,69 @@ async function deleteLine(i) {
   }
   renderList();
   scheduleSave();
+}
+
+/* 清单可写：文件读进来过、且没停在「文件不见了」的缺失态 */
+function listReady() {
+  return S.loaded && !S.missingShown;
+}
+
+/* 批量删除已完成（用户拍板）：只看顶层待办自己的勾选，勾了就整块删。
+   不弹确认框；删完在窗口底部给一条 3 秒的回执，点它就撤销整批（Q4 A）。
+   整批只压一个快照：浮在半空的编辑先落定（它们自己会压快照），
+   之后才是这一批的那一个 —— 回执点一下、或 Ctrl+Z 一次就退回去。 */
+async function deleteCompletedTodos() {
+  if (!listReady()) return;
+  await requestPanelCommit();   // 详情面板里改了一半的先落回来
+  const blocks = md.completedScan(S.lines);
+  if (!blocks.length) return;
+  const covers = (k) => blocks.some((b) => b.i <= k && k < b.end);
+  // 正在编辑的那行若要被删：不提交，直接丢弃（与单条删除同款）；没被删就先提交，别把打的字丢了
+  if (S.edit) { if (covers(S.edit.index)) discardEditor(); else closeEditor(); }
+  pushUndo();
+  // 面板盯着的待办若落在被删块里，跟着关掉
+  if (S.panelOpen && covers(S.panelTodo)) closePanel();
+  const n = blocks.length;
+  const withUnfinished = blocks.filter((b) => b.unfinished > 0).length;
+  S.lines = md.deleteCompleted(S.lines);
+  renderList();
+  scheduleSave();
+  showToast(`已删除 ${n} 条 · Ctrl+Z 撤销`,
+    withUnfinished ? `其中 ${withUnfinished} 条待办下有未勾选的子待办` : '',
+    undo);
+  log(`cleared ${n} completed (${withUnfinished} with unfinished children)`);
+}
+
+/* ---------- 回执浮层 ----------
+   这个应用原本没有「说一句话又自己消失」的位置；撤销也一直只藏在 Ctrl+Z 里。
+   浮层只在批量删除后出现 3 秒，可点时点一下就是撤销。 */
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+
+function showToast(main, sub, onUndo) {
+  if (!toastEl) return;
+  toastEl.textContent = '';
+  const head = document.createElement('div');
+  head.textContent = main;
+  toastEl.appendChild(head);
+  if (sub) {
+    const line = document.createElement('div');
+    line.className = 'toast-sub';
+    line.textContent = sub;
+    toastEl.appendChild(line);
+  }
+  toastEl.classList.toggle('clickable', !!onUndo);
+  toastEl.onclick = onUndo ? () => { hideToast(); onUndo(); } : null;
+  toastEl.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 3000);
+}
+
+function hideToast() {
+  if (!toastEl) return;
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+  toastEl.classList.remove('show');
+  toastEl.onclick = null;
 }
 
 function groupBlockEnd(i) {
@@ -1208,6 +1277,23 @@ const ICON_PIN_SVG = '<svg viewBox="0 0 24 24" fill="none">'
   + '<path d="M12 17v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
   + '<path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'
   + '</svg>';
+/* 删除已完成 = 带盖的垃圾桶：13px 下只留「盖一条横线 + 把手 + 收口桶身」，
+   桶身不与盖闭合（盖线自己封口），多加竖条纹会糊成一团。 */
+const ICON_TRASH_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M2.5 3.5H10.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+  + '<path d="M5.5 3.5V2.5H7.5V3.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M3.7 3.5L4.3 10.8H8.7L9.3 3.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
+  + '</svg>';
+
+/* 顶部这枚按钮的状态：有没有可删的、title 报几条。renderList / showMissing 收尾各调一次，
+   所以任何一次重画（装载、勾选、外部改动、撤销）之后它都是新的。 */
+function updateClearButton() {
+  const btn = $('btn-clear-done');
+  if (!btn) return;
+  const n = listReady() ? md.completedScan(S.lines).length : 0;
+  btn.disabled = n === 0;
+  btn.title = n > 0 ? `删除已完成（${n}）` : '删除已完成';
+}
 
 function bindChrome() {
   const on = (id, fn) => $(id).addEventListener('click', fn);
@@ -1220,16 +1306,19 @@ function bindChrome() {
   // ↗ 交给 Rust 侧的“路径不存在”提示，不静默失败。
   on('btn-choose', chooseFile);
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
+  on('btn-clear-done', deleteCompletedTodos);
   $('btn-choose').innerHTML = ICON_CHOOSE_SVG;
   $('btn-reveal').innerHTML = ICON_REVEAL_SVG;
-  // 其余四枚也走同一套注入：HTML 里只留空按钮，图标只在 app.js 有一份定义。
+  // 其余五枚也走同一套注入：HTML 里只留空按钮，图标只在 app.js 有一份定义。
   const ICONS = {
     'btn-new': ICON_NEW_SVG, 'btn-pin': ICON_PIN_SVG,
     'btn-refresh': ICON_REFRESH_SVG, 'btn-close': ICON_CLOSE_SVG,
+    'btn-clear-done': ICON_TRASH_SVG,
   };
   for (const [id, svg] of Object.entries(ICONS)) $(id).innerHTML = svg;
   // Tk 按钮按下不夺焦点（Canvas 无焦点），防止空格键误触
-  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-new', 'btn-choose', 'btn-reveal']) {
+  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-new', 'btn-choose',
+    'btn-reveal', 'btn-clear-done']) {
     $(id).addEventListener('mousedown', (e) => e.preventDefault());
     $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
   }
