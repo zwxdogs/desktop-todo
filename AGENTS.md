@@ -12,6 +12,14 @@ Five canonical triage roles; each label string equals its role name. See `docs/a
 
 Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Branching and release
+
+`dev` is the integration branch: all features, fixes, and refactors land there first. `main` carries released code only.
+
+- Work on `dev`. Do not commit directly to `main`; branch off `dev` only when a change needs isolation, then merge it back into `dev`.
+- Release = merge `dev` into `main`, bump the version in `app/src-tauri/tauri.conf.json` (+ `Cargo.toml`), commit, tag `v<version>`, push `main` and the tag, then rebuild and redeploy per below.
+- `dev` stays ahead of `main` between releases; never force-push `main`.
+
 ### Rebuild and redeploy after source changes
 
 After ANY change to source code — adding a feature, fixing a bug, refactoring, bumping the version — always:
