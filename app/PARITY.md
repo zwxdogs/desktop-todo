@@ -18,7 +18,7 @@
 | —（0.4.0 新增） | blockEnd / allowsTopSlot / canMove / moveBlock | 拖动排序的行块定义与搬运（纯函数，26 项 TDD） |
 | —（0.4.1 新增） | groupTodoIndent / todoBelow | 行内加号的落点与缩进（纯函数，8 项 TDD） |
 | —（0.4.2 新增） | completedScan / deleteCompleted | 批量删除已完成：哪些块算「已完成」、整块删（纯函数，12 项 TDD，§3-15） |
-| —（0.4.2 新增） | createList（app/ui/list.js） | 清单的八个变更意图 + 撤销栈 + 写盘合并 + 面板锚点（模块 + hooks，26 项 TDD，§3-17） |
+| —（0.4.2 新增） | createList（app/ui/list.js） | 清单的八个变更意图 + 撤销栈 + 写盘合并 + 面板锚点（模块 + hooks，26 项 TDD） |
 
 测试：`node --test app/ui/*.test.js` = **144/144**（md + 行内加号落点 + 批量删除已完成 + 清单模块 + undo + 新建示例文案 + 滚动条几何，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。
 
@@ -27,7 +27,7 @@
 | todo.pyw | Tauri 实现载体 | 状态 |
 |---|---|---|
 | read_file(540)/write_text(550) | Rust read_md_file/write_md_file（BOM/`.todo_tmp`/replace/只读警告） | 等效 |
-| load_file(565) | app.js loadFile（missing→showMissing；undo 栈重置；标题 basename 去 .md） | 等效 |
+| load_file(565) | app.js loadFile（missing→showMissing；undo 栈重置；标题由 Rust FileIdentity 回传，去 .md） | 等效 |
 | refresh_from_disk(581) | **已删除**（顶栏 ↻ 已去掉：外部改动本来就由 `poll_tick` 每秒按 mtime:size 自动重载，§3-16） | 取消 |
 | show_missing(591) | app.js showMissing（同文案/wraplength 300） | 等效 |
 | render_list(605) | app.js renderList（滚动分数保存恢复；0.4.0 起主窗口跳过备注行） | 等效 |
@@ -35,7 +35,7 @@
 | draw_box(709) | app.js boxSvg（勾/白折线/2px 边） | 等效 |
 | badge(750) | app.js makeBadge（SVG 勾/页 + %d/%d %d，仅 td‖nt） | 等效；0.4.0 起悬停整行时徽标左移给行右缘的加号与把手让位，0.4.1 起让位 40px（§3-14） |
 | 顶栏 hbtn(398-478) | index.html .hbtn（0.4.2 起 5 枚）+ CSS hover/press/lit/disabled | 等效；0.4.0 起另有 3 个 SVG 图标按钮（更换文件 / 新建待办文件 / 打开文件位置，§3-10），0.4.2 起前两者合并成「文件菜单」下拉、再加「删除已完成」（§3-15、§3-16） |
-| grip(495) | index.html #grip SVG 3 斜线 + hover 变色 | 等效 |
+| grip(495) | index.html #grip SVG 3 斜线（描边 --c-grip，定义于 style.css）+ hover 变色 | 等效 |
 | edit_row(835) | app.js editRow（Entry→input；不 trim、空照写；Esc/Enter/blur 同语义） | 等效 |
 | toggle_line(827) | app.js（box click → toggle → render → save） | 等效 |
 | insert_line(927) | app.js insertLine（ref=pos??i；nl 补行；30ms 后聚焦新行） | 等效 |
@@ -56,7 +56,7 @@
 | p_menu(1422) | panel.js pMenu（[编辑, 删除]） | 等效* |
 | p_add_todo/p_add_note(1435/1445) | app.js pAddTodo/pAddNote（pos/child_indent 逐参数一致） | 等效 |
 | _next_todo_indent(1454) | md.groupTodoIndent（纯函数，§3-14） | 搬家 |
-| choose_file(1488) | app.js chooseFile + Rust rfd（initdir/过滤器；path 落 Rust Shared.file） | 等效 |
+| choose_file(1488) | app.js chooseFile + Rust rfd（initdir/过滤器；回传 {file,title} 并落 Rust Shared.file） | 等效 |
 | —（0.4.0 新增） | Rust new_md_file + app.js newFile（rfd 另存为：默认名 `待办.md`、默认目录=当前文件父目录或 exe 目录、父目录缺则建；目标已存在→只切换不覆盖；新建时写入 starterText 示例，§3-12） | 新增 |
 | open_file_location(1499) | Rust open_file_location（`explorer /select,"路径"`，路径先经 `explorer_path` 规范成反斜杠绝对路径——正斜杠会让 explorer 只开默认文件夹、不选中文件，2026-11-14 修；父目录；双不存在弹窗） | 等效 |
 | toggle_dock/_update_pin(1517-1538) | app.js toggleDock/updatePin + Rust set_docked_state/apply_docked（点亮=固定在桌面：压底+TOOLWINDOW+无任务栏；不点亮=普通窗口：正常 z 序+任务栏图标；两态都不 topmost） | 语义改写（ADR 0004） |
@@ -91,6 +91,8 @@
 
 16. **顶栏文件入口合并成一枚下拉，↻ 删除（0.4.2 变更）**：「更换文件…」与「新建待办文件…」两枚常驻图标合并成左侧第一枚（纯文档页图标，不叠箭头也不叠加号——13px 下多一笔会糊，菜单项自己说明是打开还是新建），单击展开下拉、再单击同一枚收起，点窗口内别处、Esc、窗口失焦也收起；下拉锚在按钮左下角，溢出时由 `showMenu` 夹回窗口内，展开期间按钮与 📌 同款点亮（`.hbtn.lit`）。两项「打开文件…」「新建文件…」仍走原生对话框，行为不变。缺文件提示相应从“第 N 个图标新建 / 第 M 个图标打开”改成“点第 N 个图标在菜单里选”（`missingHint(fileIdx)` 单序号，纯函数单测跟着改）。「打开文件位置」的 ↗ 换成闭合文件夹图标（左上抬起的 tab），并在缺失态置灰（`updateRevealButton` 与 `updateClearButton` 由 `updateChrome` 一起刷，挂在 `renderList`/`showMissing` 末尾）：那时 `S.file` 的路径多半不存在，Rust 的 `open_file_location` 只能打开不存在的父目录、或弹出「文件和目录都不存在」。↻（从磁盘刷新）整枚删除，`refreshFromDisk` 一并删掉：外部改动本来就由 `poll_tick` 每秒按 mtime:size 自动重载，而用户已不再手改原始 md（先落盘再读回那条手动路径不再需要）。顶栏因此从 7 枚变 5 枚；关闭“点别处”的监听从捕获期 `mousedown` 换成捕获期 `pointerdown`——标题栏拖动区上的 mousedown 会被 Tauri 注入的 drag.js 吞掉，pointerdown 早于它，标题栏空白处才关得掉。
 
+17. **文件身份收归 Rust（0.4.2，[#12](https://github.com/zwxdogs/desktop-todo/issues/12)）**：`Shared.file` 是「当前打开哪个文件」的唯一来源，`app_info` / `choose_file` / `new_md_file` 回传 `{file,title}`（标题 = 文件名去尾部 `.md`，大小写不敏感；空路径回程序名），前端只把回传的路径原样转发给 read/write/stat/reveal/poll_tick，不再自己 basename、也不从全局状态猜路径；`poll_tick` 改为接收显式路径（仍是 1 s 维护轮询）。唯一可见差异：文件本身就叫 `.md` 时标题保留 `.md`，Tk 会得到空标题（有意不学，标题永不为空）。同轮修掉两处静默失败：标题此前读 `AppInfo.title` 而 Rust 从不回传，永远显示回退常量；把手描边引用的 `--c-grip` 从未定义，未悬停时三条斜线静默不画。
+
 ## 4. 验证状态
 - [x] 纯函数 TDD 89/89（`node --test app/ui/*.test.js`，2026-11-13）
 - [x] Rust release 编译通过（`app\build.ps1`，产物 `dist\DesktopTodo\DesktopTodo.exe`，2026-11-13）
@@ -113,3 +115,4 @@
 - [x] 0.4.2 打开文件位置修斜杠（2026-11-14）：`config.json` 里 `file` 是 `E:/项目/待办.md`（Tk 时代留下的正斜杠），Rust 把原样字符串交给 `explorer /select,"…"`，explorer 判定参数非法、转去打开自己的默认文件夹（这台机器上是「桌面」），既不进父目录也不选中文件——复现出来就是用户截图那种「打开的窗口里找不到 md」。修法：`explorer_path()` 把分隔符换反斜杠并剥掉 canonicalize 的 `\\?\` / `\\?\UNC\` 前缀，`absolute_explorer_path()` 用 canonicalize 补绝对路径；缺文件退开父目录那条一起过（`explorer <dir>` 同样只认反斜杠）。`cargo test --offline` 9/9（新增 `explorer_path_tests` 3 项：正斜杠转反斜杠、verbatim 前缀剥离、原生路径原样）、`node --test app/ui/*.test.js` 118/118、`app\build.ps1` release 构建后部署重启（`E:\桌面待办\DesktopTodo`，`config.json` 原样）。实机两步对照（`SetCursorPos` + `mouse_event` 点顶栏文件夹图标，`CopyFromScreen` 截窗口）：旧构建日志 `open location: E:/项目/待办.md`、前台冒出一个「桌面 - 文件资源管理器」（= 用户报的现象）；新构建日志 `open location: E:\项目\待办.md`，打开的是「E:\项目」窗口且 `待办.md` 已选中，状态栏「选中 1 个项目 972 字节」。命令行单独跑 `explorer /select,"E:/项目/待办.md"` 同样落在「桌面」，与 app 内一致。踩到的坑：点按钮前要先点一下窗口内容区把应用切到前台，否则第一次 `mouse_event` 只起激活作用、按钮不响应；点内容区别落在勾选框列上（x 太小会误勾一条待办，这次误勾了「双波长去混叠求解器修改优化」，已按原字节改回 `- [ ]`）
 - [x] 0.4.2 顶栏文件菜单合并 / 文件夹图标 / 删 ↻（2026-11-14）：`node --test app/ui/*.test.js` 118/118（`app/ui/starter.test.js` 两项跟着 `missingHint` 单序号改写）、`node --check`（复制成 `.mjs` 后按 ESM 解析）通过、`app\build.ps1` release 构建后部署重启（`E:\桌面待办\DesktopTodo`，`config.json` 原样）。DOM 事件顺序没有可测接缝（现有测试全是纯函数），验收走实机：用 `SetCursorPos` + `mouse_event` 模拟鼠标（辅助进程必须先 `SetProcessDPIAware`，否则 200% DPI 下传给 `SetCursorPos` 的物理坐标会被再缩一次而点空——第一次验失败就是这个原因）＋ `CopyFromScreen` 截窗口对照（`PrintWindow` 抓不到合成层，见「0.4.1 自绘滚动条」那条）。实测五项：点文件菜单展开「打开文件… / 新建文件…」两项且按钮点亮；再点同一枚收起；点标题栏空白（拖动区，即 mousedown 被 drag.js 吞掉的那条路径）收起且窗口位置未变（`GetWindowRect` 前后同为 3049,748）；点清单正文收起；Esc 收起。缺文件态另用 testing 模式的临时实例复现（`DesktopTodo.exe <一个不存在的路径>`，不读写 `config.json`）：占位文案是新的单序号版，「打开文件位置」与「删除已完成」两枚同时置灰。同轮 code-review（Standards + Spec 两轴）修掉：本文件首行误加的 BOM、§2 hbtn 行把合并对象写成「更换文件 + 打开文件位置」（应为更换文件 + 新建待办文件）、§3-1 的菜单处数、§3-10 里“常驻图标没有开合状态”的旧结论、§3-12 仍引用已删除的 `refreshFromDisk`、§3-15 的图标序号、§3-16 的「路径不存在」措辞、README 的禁用词（标题栏 / 更换文件），以及代码侧 `showMenu` 顺手改 owner 态改为调用方 `setMenuOwner`、两处并列的 `update*Button` 合并成 `updateChrome`
 - [x] 0.4.2 清单模块（2026-11-14，[#11](https://github.com/zwxdogs/desktop-todo/issues/11)）：八个变更意图（勾选/改字/插入/删除/搬块/删除已完成/整份替换/撤销）收进 `app/ui/list.js`，撤销栈、250 ms 写盘合并、面板锚点、行保真都留在模块里；`app/ui/app.js` 十二处「压撤销 → 改行 → 重绘 → 排写盘」序列删除，入口只调意图（行为不变，§3 无新偏离）。`node --test app/ui/*.test.js` 144/144（新增 `app/ui/list.test.js` 26 项：逐字节勾选、行保真、锚点跟随、插入换行修补、子树删除、非法搬动、撤销先写后换、写盘合并、写盘失败不回滚）、`node --check` 按 ESM 解析通过、`cargo test --offline` 9/9、`app\build.ps1` release 构建后部署重启（`E:\桌面待办\DesktopTodo`，`config.json` 原样，启动日志 `loaded 27 lines` / `ui ready` / `panel: ready`）。DOM 侧验收走 WebView2 远程调试实机驱动（testing 实例 + CDP `Runtime.evaluate` / `Input.dispatchMouseEvent`，不动真实清单）：勾选 alpha 落盘 `- [x]`、Ctrl+Z 还原字节；双击分组标题改名并提交；悬停加号插入并命名；真实鼠标拖把手把末位待办拖到首位（`drop-line` 出现、落盘顺序改变）；勾上带未勾子项的父项后点垃圾桶，整块删除并弹出「已删除 1 条 · Ctrl+Z 撤销 / 其中 1 条待办下有未勾选的子待办」，Ctrl+Z 整批退回且勾选态还原；面板双击标题改名、点「＋ 添加子待办」插子行并提交，均落盘
+- [x] 0.4.2 文件身份唯一所有者 + 标题/把手静默失败（2026-11-14，[#12](https://github.com/zwxdogs/desktop-todo/issues/12)）：`cargo test --offline` 13/13（新增 `file_identity_tests` 4 项：标题去 `.md`/`.MD`、别的扩展名原样、`.md` 本身保留、wire 字段平铺且不含 `testing`）、`node --test app/ui/*.test.js` 149/149（新增 `app/ui/identity.js` 的 `readIdentity` 5 项：回传原样、多余字段不参与、缺 title 抛错、null 抛错、类型不对抛错——读端不再把 undefined 静默落进状态）、`app\build.ps1` release 构建后部署重启（`E:\桌面待办\DesktopTodo`，`config.json` 原样，启动日志 `loaded 27 lines` / `ui ready` / `panel: ready`）。DOM 侧没有 node 接缝（现有测试全是纯函数，`app.js` 依赖 DOM/Tauri），验收走 WebView2 远程调试实机（testing 实例 `%TEMP%\dt-verify\检查清单.md` + CDP `Runtime.evaluate`）：`app_info` 回 `{file,title:"检查清单",docked}`、`#title` 文本=检查清单；`poll_tick` 显式带上路径、回来的就是该文件 stat；把手未悬停 `stroke rgb(168,176,188)`、悬停 `rgb(139,149,161)`；真实实例 `app_info` 回 `{file:"E:/项目/待办.md",title:"待办"}`、`#title`=待办。同一轮 code-review（Standards + Spec 两轴）修掉：本文件 §2 三行陈旧记录与 §3 新偏离、§1 悬空的 §3-17 引用；`PollOut.file` 回显删除（JS 在请求前捕获路径，判陈旧帧）；`choose_file`/`new_md_file` 抽 `set_current_file`；注释改成「`Shared.file` 是 config 记录、也是身份来源」而不是「读写对象的唯一所有者」；`file_title` 的 splitext 注释纠正；`var(--c-grip)` 从 SVG presentation attribute 移到 CSS 规则（SVGWG 未定案）；`adoptFile` 不再立即改标题——等 `loadFile` 读成功再落字，避免新文件名配着旧清单一起显示

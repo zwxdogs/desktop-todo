@@ -11,6 +11,7 @@ import { createList } from './list.js';
 import { starterText, missingHint } from './starter.js';
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
+import { readIdentity } from './identity.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -37,7 +38,8 @@ let mainScroll = null;   // 自绘滚动条（0.4.1；bindChrome 里挂到 listE
 
 const S = {
   lines: [],       // 清单模块那份数组的镜像：每次重绘前由 render 钩子同步
-  file: '',
+  file: '',        // 最近一次从 Rust 命令采纳的路径：只原样转发给文件类命令，不自己拼
+  title: '',       // 与 file 同时采纳的顶栏标题；装载成功后由 loadFile 落字（错误提示只是临时覆盖）
   lastSeen: null,
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
@@ -98,8 +100,19 @@ const DND = {
 function log(msg) { invoke('log_line', { msg: String(msg) }); }
 
 /* 标题被 ellipsis 截断时，悬停由 title 属性给出完整文件名（Tk 用 winfo 无此需求，0.4.x 新增）。
-   保存失败时 setTitle('保存失败!') 会连 tooltip 一起变成提示语——可接受的副作用。 */
+   保存/新建失败时 setTitle('…失败!') 会连 tooltip 一起变成提示语——可接受的临时副作用，
+   下一次装载成功会从 S.title 恢复（S.title 也只来自 Rust 命令回传）。 */
 function setTitle(t) { titleEl.textContent = t; titleEl.title = t; }
+
+/* 采纳 Rust 回传的文件身份（app_info / choose_file / new_md_file）。身份只在 Rust 侧产生
+   （Shared.file）；这里存下的 file 只是最近一次回传的投影：原样转发给文件类命令，不自己
+   拼路径、不派生标题（#12）。readIdentity 先把字段逐个验过，读不到就抛错（不再静默回退）。
+   标题先不进界面——loadFile 读成功了才落字，免得新文件名配着旧文件的清单一起显示。 */
+function adoptFile(raw) {
+  const identity = readIdentity(raw);
+  S.file = identity.file;
+  S.title = identity.title;
+}
 
 async function statNow() {
   try {
@@ -126,11 +139,6 @@ async function writeText(content) {
     log(`write failed: ${e}`);
     return false;
   }
-}
-
-function basename(p) {
-  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-  return i >= 0 ? p.slice(i + 1) : p;
 }
 
 /* ---------- 变更前收尾 + 撤销（todo.pyw:1000-1023） ----------
@@ -201,9 +209,7 @@ async function loadFile() {
     return;
   }
   S.loaded = true;
-  let base = basename(S.file);
-  if (base.toLowerCase().endsWith('.md')) base = base.slice(0, -3);
-  setTitle(base);
+  setTitle(S.title);   // 装载成功 = 回到当前文件名（清掉上一次「新建失败!」之类的临时提示）
   // 整份替换：换行符、BOM、撤销栈都交给清单模块，替换本身不写盘（外部改动重载，Tk 同款）
   list.replaceAll({ lines: md.parseText(data.text), nl: data.nl, hasBom: data.has_bom });
   S.lastSeen = await statNow();
@@ -1058,10 +1064,11 @@ function pAddBelow(kind, j) {
 
 /* ---------- 文件/窗口杂项（todo.pyw:1488-1538） ---------- */
 
-/* 切到另一个文件（更换文件 / 新建共用）。Rust 侧的 Shared.file 已经由对应命令改好，
-   这里只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。 */
-async function switchToFile(path) {
-  S.file = path;
+/* 切到另一个文件（更换文件 / 新建共用）。身份只从命令回传的 {file,title} 采纳（#12）：
+   「当前打开哪个文件」的唯一所有者在 Rust，这里不自己拼路径、也不猜标题；
+   只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。 */
+async function switchToFile(identity) {
+  adoptFile(identity);
   S.missingShown = false;
   closePanel();
   await loadFile();
@@ -1069,8 +1076,8 @@ async function switchToFile(path) {
 }
 
 async function chooseFile() {
-  const path = await invoke('choose_file');
-  if (path) await switchToFile(path);
+  const identity = await invoke('choose_file');
+  if (identity) await switchToFile(identity);
 }
 
 /* ＋ 新建待办文件（0.4.0）：原生「另存为」挑位置，新路径写一份示例内容；
@@ -1091,8 +1098,8 @@ async function newFile() {
     return;
   }
   if (!res) return;                                  // 对话框取消
-  await switchToFile(res.path);
-  log(res.created ? `created ${res.path}` : `existing file opened: ${res.path}`);
+  await switchToFile(res);
+  log(res.created ? `created ${res.file}` : `existing file opened: ${res.file}`);
 }
 
 function toggleDock() {
@@ -1113,18 +1120,24 @@ function updateDockButton() {
 
 async function pollTick() {
   try {
-    const st = await invoke('poll_tick');   // Win32 维护（贴桌面/面板置顶/离屏救援/配置落盘）在 Rust 侧
-    const cur = st ? `${st.mtime_ns}:${st.size}` : null;
-    if (!st) {
-      if (!S.missingShown) {
-        showMissing();
-        log('file disappeared');
+    // 维护（贴桌面/面板置顶/离屏救援/配置落盘）在 Rust 侧；路径显式带上，回来的就是它的 stat。
+    // 响应回来时若当前文件已经换掉（切换命令先到），这一帧作废：不拿旧文件的 stat 误判新文件
+    // （会把新文件显示成「缺失」或反复重载）；轮询也不私有地改身份（#12）。
+    const file = S.file;
+    const st = await invoke('poll_tick', { file });
+    if (file === S.file) {
+      const cur = st ? `${st.mtime_ns}:${st.size}` : null;
+      if (!st) {
+        if (!S.missingShown) {
+          showMissing();
+          log('file disappeared');
+        }
+        S.lastSeen = null;
+      } else if (cur !== S.lastSeen) {
+        S.lastSeen = cur;
+        log('external change -> reload');
+        await loadFile();
       }
-      S.lastSeen = null;
-    } else if (cur !== S.lastSeen) {
-      S.lastSeen = cur;
-      log('external change -> reload');
-      await loadFile();
     }
   } catch (e) {
     log(`poll error: ${e}`);
@@ -1282,9 +1295,8 @@ async function boot() {
   // 先挂退出监听：后面任何一步抛错（后端命令失败、文件读不了）都不该连带把「退出」弄死（ADR 0008）
   await window.__TAURI__.event.listen('app-exit-request', () => exitApp());
   const info = await invoke('app_info');
-  S.file = info.file;
-  S.docked = info.docked !== undefined ? !!info.docked : false;
-  setTitle(info.title || '桌面待办');
+  adoptFile(info);   // 唯一所有者回传 {file,title}：前端不另存、不猜
+  S.docked = !!info.docked;   // app_info 必带 docked，没有「读不到就猜 false」的余地
   updateDockButton();
 
   bindChrome();

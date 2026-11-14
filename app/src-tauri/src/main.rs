@@ -106,7 +106,7 @@ fn now_hms() -> String {
 // ---------------- 共享状态 ----------------
 struct Shared {
     exe_dir: PathBuf,
-    file: PathBuf,
+    file: PathBuf, // config.json 记的当前文件：身份的唯一来源，命令返回时现算成 FileIdentity
     testing: bool,
     docked: bool,
     ro_warned: bool,
@@ -405,10 +405,51 @@ fn load_config(app_dir: &Path) -> ConfigRaw {
 }
 
 // ---------------- 数据对象 ----------------
+
+/// 当前打开文件的身份：路径 + 顶栏标题。
+///
+/// 身份只在 Rust 侧产生：`Shared.file` 是唯一来源，命令返回时现算成 `{file, title}`。
+/// 前端只把回传的路径原样转发给文件类命令（命令的参数永远显式带路径，不读 `Shared.file`
+/// 猜目标），不自己派生标题、也不另存一份身份（#12）。
+#[derive(Serialize, Debug)]
+struct FileIdentity {
+    file: String,
+    title: String,
+}
+
+/// 顶栏标题 = 文件名去掉尾部 `.md`（Windows 文件名大小写不敏感，`.MD` 同样去掉），
+/// 与 Tk load_file(565) 的「basename → 去 .md」一致；别的扩展名算文件名的一部分。
+/// 空路径 → 程序名（config 里还没有文件时的引导态）。文件本身就叫 `.md` 时保留原文，
+/// 不学 Tk 抹成空标题（PARITY §3-17）。
+fn file_title(path: &Path) -> String {
+    let Some(name) = path.file_name() else { return APP_NAME.to_string() };
+    let name = name.to_string_lossy();
+    let bytes = name.as_bytes();
+    // 要求有主体才剥，标题永不为空；Tk 对 `.md` 本身会得到空串
+    if bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md") {
+        name[..name.len() - 3].to_string()
+    } else {
+        name.into_owned()
+    }
+}
+
+impl FileIdentity {
+    fn of(path: &Path) -> Self {
+        Self { file: path.to_string_lossy().into_owned(), title: file_title(path) }
+    }
+}
+
+/// 换掉当前文件：唯一所有者换人，同时把新身份当场回传（choose_file / new_md_file 共用）。
+fn set_current_file(app: &AppHandle, path: PathBuf) -> FileIdentity {
+    let identity = FileIdentity::of(&path);
+    app.state::<Mutex<Shared>>().lock().unwrap().file = path;
+    identity
+}
+
 #[derive(Serialize)]
 struct AppInfo {
-    file: String,
-    testing: bool,
+    #[serde(flatten)]
+    identity: FileIdentity,
     docked: bool,
 }
 
@@ -468,7 +509,7 @@ fn write_md_file(path: &Path, content: &str, has_bom: bool) -> Result<(), String
 fn app_info(app: AppHandle) -> AppInfo {
     let s = app.state::<Mutex<Shared>>();
     let s = s.lock().unwrap();
-    AppInfo { file: s.file.to_string_lossy().into_owned(), testing: s.testing, docked: s.docked }
+    AppInfo { identity: FileIdentity::of(&s.file), docked: s.docked }
 }
 
 #[tauri::command]
@@ -604,14 +645,15 @@ fn resize_start(window: tauri::Window) {
 }
 
 // 1s 维护轮询（对齐 todo.pyw poll()）：贴桌面维持、面板置顶自愈、离屏救援、
-// config 落盘；返回文件状态供 JS 决定是否重载。
+// config 落盘；返回传入路径的文件状态供 JS 决定是否重载。
+// 路径由前端显式传入、不从 Shared.file 猜：轮询只报调用方指着的那个文件（#12）。
 #[tauri::command]
-fn poll_tick(app: AppHandle, win: WebviewWindow) -> Option<FileState> {
+fn poll_tick(app: AppHandle, win: WebviewWindow, file: String) -> Option<FileState> {
     let hwnd = win_hwnd(&win);
-    let (docked, file) = {
+    let docked = {
         let s = app.state::<Mutex<Shared>>();
         let s = s.lock().unwrap();
-        (s.docked, s.file.clone())
+        s.docked
     };
     if docked {
         if let Some(h) = hwnd {
@@ -658,7 +700,7 @@ fn poll_tick(app: AppHandle, win: WebviewWindow) -> Option<FileState> {
         write_config(&app);
         app.state::<Mutex<Shared>>().lock().unwrap().dirty_config = false;
     }
-    stat_file(&file)
+    stat_file(Path::new(&file))
 }
 
 #[tauri::command]
@@ -695,7 +737,7 @@ fn panel_close(app: AppHandle) {
 }
 
 #[tauri::command]
-async fn choose_file(app: AppHandle) -> Option<String> {
+async fn choose_file(app: AppHandle) -> Option<FileIdentity> {
     let (cur, exe_dir) = {
         let s = app.state::<Mutex<Shared>>();
         let s = s.lock().unwrap();
@@ -711,10 +753,9 @@ async fn choose_file(app: AppHandle) -> Option<String> {
     }
     dlg = dlg.add_filter("Markdown 文件", &["md"]).add_filter("所有文件", &["*"]);
     dlg.pick_file().map(|p| {
-        // Tk choose_file(1493)：self.file = path —— 后续 save_config/读写都用新路径
-        let path = p.to_string_lossy().into_owned();
-        app.state::<Mutex<Shared>>().lock().unwrap().file = PathBuf::from(&path);
-        path
+        // Tk choose_file(1493)：self.file = path —— 后续 save_config 都落新路径；
+        // 读写类命令不读它，目标永远由调用方显式带路径
+        set_current_file(&app, p)
     })
 }
 
@@ -725,7 +766,8 @@ async fn choose_file(app: AppHandle) -> Option<String> {
    父目录不存在时一并 create_dir_all：write_md_file 只做 tmp + rename，自己不会建目录。 */
 #[derive(Serialize)]
 struct NewFileOut {
-    path: String,
+    #[serde(flatten)]
+    identity: FileIdentity,
     created: bool,
 }
 
@@ -758,8 +800,7 @@ async fn new_md_file(app: AppHandle, content: String) -> Result<Option<NewFileOu
         }
         write_md_file(&p, &content, false)?;
     }
-    app.state::<Mutex<Shared>>().lock().unwrap().file = p.clone();
-    Ok(Some(NewFileOut { path: p.to_string_lossy().into_owned(), created }))
+    Ok(Some(NewFileOut { identity: set_current_file(&app, p), created }))
 }
 
 // explorer 的命令行只认**反斜杠分隔的绝对路径**：拿 `E:/项目/待办.md` 这种正斜杠路径喂 `/select,`，
@@ -1396,6 +1437,56 @@ mod dock_style_tests {
             watchdog_step(Duration::from_secs(999), limit, WATCHDOG_MAX_RELOADS, true, true),
             WatchdogStep::Idle
         ));
+    }
+}
+
+// #12：文件身份只由 Rust 从路径派生，前端不再自己 basename；标题规则单独钉住。
+#[cfg(test)]
+mod file_identity_tests {
+    use super::*;
+
+    fn id_of(p: &str) -> FileIdentity {
+        FileIdentity::of(Path::new(p))
+    }
+
+    #[test]
+    fn title_is_the_file_name_without_a_md_extension() {
+        // Windows 文件名大小写不敏感：.MD 与 .md 一样去掉
+        assert_eq!(id_of("E:\\项目\\待办.md").title, "待办");
+        assert_eq!(id_of("/home/u/work.MD").title, "work");
+        // 只去 .md；别的扩展名是文件名的一部分（Tk load_file 同款 basename→去 .md）
+        assert_eq!(id_of("notes.txt").title, "notes.txt");
+        // 文件本身就叫 .md：保留原文，不学 Tk 抹成空标题（PARITY §3-17）
+        assert_eq!(id_of(".md").title, ".md");
+    }
+
+    #[test]
+    fn identity_carries_the_path_the_file_commands_take() {
+        // 前端把 file 原样转发给 read/write/stat/reveal，这条是命令参数的契约
+        assert_eq!(id_of("E:/项目/待办.md").file, "E:/项目/待办.md");
+    }
+
+    #[test]
+    fn no_file_falls_back_to_the_app_name() {
+        // Path::new("") 没有 file_name：配置缺失时标题显示程序名，而不是空字符串
+        assert_eq!(id_of("").title, APP_NAME);
+        assert_eq!(id_of("").file, "");
+    }
+
+    #[test]
+    fn identity_fields_are_flat_on_the_wire() {
+        // 前端按 info.file / info.title / res.file / res.created 逐字段读：嵌套一层就读不到，
+        // 正是 #12 要消灭的「字段对不上却靠回退默认值不报错」。
+        let info = serde_json::to_value(AppInfo { identity: id_of("待办.md"), docked: true }).unwrap();
+        assert_eq!(info["file"], "待办.md");
+        assert_eq!(info["title"], "待办");
+        assert_eq!(info["docked"], true);
+        assert!(info.get("testing").is_none(), "前端从不读 testing，回传字段不能多于读取");
+
+        let neu = serde_json::to_value(NewFileOut { identity: id_of("新的.md"), created: false }).unwrap();
+        assert_eq!(neu["file"], "新的.md");
+        assert_eq!(neu["title"], "新的");
+        assert_eq!(neu["created"], false);
     }
 }
 
