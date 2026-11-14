@@ -37,15 +37,15 @@ test('示例内容每一行都用调用方给的换行符结尾', () => {
   assert.equal(lf.includes('\r'), false);
 });
 
-test('没有打开文件时的提示按图标序号告诉用户点哪一个', () => {
-  assert.equal(missingHint(2, 1),
+test('没有打开文件时的提示按图标序号告诉用户点哪一个，动作在菜单里选', () => {
+  assert.equal(missingHint(1),
     '目前没有打开待办 Markdown 文件。\n'
-    + '请点击上方的第 2 个图标新建文件，或点击第 1 个图标打开已有文件。');
+    + '请点击上方的第 1 个图标，在菜单里选择「打开文件」或「新建文件」。');
 });
 
 test('拿不到图标序号时不写出「第 0 个」，退化成不带数字的提示', () => {
-  const t = missingHint(0, 0);
+  const t = missingHint(0);
   assert.ok(!t.includes('第 0 个'));
   assert.ok(t.includes('新建文件'));
-  assert.ok(t.includes('打开已有文件'));
+  assert.ok(t.includes('打开文件'));
 });

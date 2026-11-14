@@ -10,13 +10,14 @@
   <!-- data-tauri-drag-region：顶栏拖动（Tk hdr/lbl_title btn-1 拖动，1602） -->
   <header id="hdr" data-tauri-drag-region>
     <span id="title" data-tauri-drag-region>桌面待办</span>
-    <!-- 按钮顺序（全部靠右、✕ 最右）：[更换文件][新建][打开文件位置][删除已完成] | 📌 ↻ ✕
-         前三个里有两个原本是“右键标题栏”菜单里的功能（菜单已整块删除，见 app.js 根因注释）；
-         ＋ 从“在末尾添加待办”改成“新建待办文件”：第一次打开时窗口里没有文件，
-         这个按钮要把用户带到“选个位置建一个”。加待办在每行右缘的小加号上（ADR 0007）。
+    <!-- 按钮顺序（全部靠右、✕ 最右）：[文件菜单][打开文件位置][删除已完成] | 📌 ✕
+         [文件菜单] 是两枚旧图标合并来的（0.4.2）：单击展开下拉，两项「打开文件…」「新建文件…」。
+         它们原本是“右键标题栏”菜单里的功能（菜单已整块删除，见 app.js 根因注释）；
+         新建从“在末尾添加待办”改成“新建待办文件”：第一次打开时窗口里没有文件，
+         这个入口要把用户带到“选个位置建一个”。加待办在每行右缘的小加号上（ADR 0007）。
+         ↻（从磁盘刷新）已删除：外部改动本来就由 poll_tick 每秒按 mtime:size 自动重载。
          分组竖线只做视觉分组，pointer-events:none 让它等同标题栏空白（可拖窗口）。 -->
-    <button class="hbtn" id="btn-choose" title="更换文件…"></button>
-    <button class="hbtn" id="btn-new" title="新建待办文件…"></button>
+    <button class="hbtn" id="btn-file" title="打开或新建待办文件…"></button>
     <button class="hbtn" id="btn-reveal" title="打开文件位置"></button>
     <!-- 批量删除已完成：与文件级操作同组、离 ✕ 最远（误点概率最低）；没有已完成项时置灰。
          不加进空白右键菜单——入口只留这一枚图标（用户拍板）。 -->
@@ -25,9 +26,8 @@
     <!-- 按钮的内脏全由 app.js 注入内联 SVG（ICON_* 常量）：同一套 13px 画布、
          同一套线宽，图标才可能逐像素对齐；用字体字形时 ＋（14pt）、📌（9pt）、
          ↻（13pt）各自墨迹中心不同，横竖都错位。右侧分组对齐 Tk pack(side=right)：
-         ✕ 最右，↻、📌 依次向左。 -->
+         ✕ 最右，📌 在它左边。 -->
     <button class="hbtn" id="btn-pin" title="固定在桌面 / 普通窗口"></button>
-    <button class="hbtn" id="btn-refresh" title="从磁盘刷新"></button>
     <button class="hbtn" id="btn-close" title="退出"></button>
   </header>
   <div id="list"></div>

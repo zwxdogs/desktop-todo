@@ -167,7 +167,8 @@ async function doSave() {
 
 /* 缺文件占位（0.4.0）：不再提「右键 → 更换文件…」（那条标题栏菜单已经整块删了），
    改成按顶栏图标的实际顺序报序号，用户照着点就行。序号每次现算，以后调按钮顺序
-   这句话会自己跟着变，不会指错地方。 */
+   这句话会自己跟着变，不会指错地方。0.4.2 起打开/新建合进同一枚下拉，
+   starter.js 的 missingHint 只收一个序号，并说明动作在菜单里选。 */
 function showMissing() {
   if (S.missingShown) return;
   S.missingShown = true;
@@ -178,9 +179,10 @@ function showMissing() {
   const btnIdx = (id) => [...document.querySelectorAll('#hdr .hbtn')].indexOf($(id)) + 1;
   const div = document.createElement('div');
   div.className = 'missing';
-  div.textContent = missingHint(btnIdx('btn-new'), btnIdx('btn-choose'));
+  // 0.4.2 起打开/新建合在一枚下拉里，所以只报一个序号（starter.js 里说明菜单项）
+  div.textContent = missingHint(btnIdx('btn-file'));
   listEl.appendChild(div);
-  updateClearButton();   // 没有清单可删，按钮得跟着置灰
+  updateChrome();   // 没有清单可删、没有文件可显示：两枚按钮都得跟着置灰
 }
 
 async function loadFile() {
@@ -215,25 +217,6 @@ async function loadFile() {
   setTitle(base);
   renderList();
   log(`loaded ${S.lines.length} lines from ${S.file}`);
-}
-
-/* ↻（todo.pyw:581-589）：先收尾未提交的编辑并落盘，再读回文件 */
-async function refreshFromDisk() {
-  await requestPanelCommit();
-  closeEditor();
-  cancelSave();
-  // 只有"内存里确实是从这个文件读出来的清单"才允许先写后读；否则 ↻ 会把一个
-  // 读取失败/尚未装载的文件清空（S.loaded 见 exitApp 同一处理由）。
-  if (S.loaded && await fileStateExists()) {
-    try {
-      if (await writeText(md.serialize(S.lines))) {
-        log(`saved ${S.lines.length} lines`);
-      }
-    } catch (e) {
-      log(`save failed: ${e}`);
-    }
-  }
-  await loadFile();
 }
 
 /* ---------- 渲染清单（todo.pyw:605-707） ---------- */
@@ -310,7 +293,7 @@ function renderList(focusIdx) {
   if (!shown && S.loaded) addEmptyHint();
   sc.scrollTop = frac * (sc.scrollHeight - sc.clientHeight);
   if (mainScroll) mainScroll.refresh();  // 行数变了：拇指长度要重算（静默，不闪）
-  updateClearButton();                  // 顶部「删除已完成」的置灰与条数跟着清单走
+  updateChrome();   // 两枚顶栏按钮的置灰与条数跟着清单走
   refreshPanel(focusIdx);              // 主列表是清单渲染的唯一出口
 }
 
@@ -906,7 +889,19 @@ function cleanupDrag() {
   DND.ghostH = 0;
 }
 
-/* ---------- 右键菜单（todo.pyw:1041-1072, 1463-1486） ---------- */
+/* ---------- 自绘菜单（右键菜单 + 顶栏文件下拉，todo.pyw:1041-1072, 1463-1486） ---------- */
+
+/* 菜单归属：下拉菜单要能「再点同一枚按钮收起」，而点别处照样关。
+   捕获期的「点菜单外关闭」跑在 click 之前，所以这里给 owner 开个豁免：
+   指针落回 owner 上时不关，留给 click 去 toggle（见 toggleFileMenu）。 */
+let menuOwner = null;
+
+/* 归属按钮：置亮（和 📌 同款“这枚按钮现在是开着的”），并让捕获期的“点菜单外关闭”放过它，
+   交给 click 去 toggle。 */
+function setMenuOwner(btn) {
+  menuOwner = btn;
+  if (btn) btn.classList.add('lit');
+}
 
 function showMenu(items, x, y) {
   menuEl.textContent = '';
@@ -936,7 +931,26 @@ function showMenu(items, x, y) {
   menuEl.style.top = `${Math.max(0, Math.min(y, maxY))}px`;
 }
 
-function hideMenu() { menuEl.style.display = 'none'; }
+function menuOpen() { return menuEl.style.display === 'block'; }
+
+function hideMenu() {
+  menuEl.style.display = 'none';
+  if (menuOwner) { menuOwner.classList.remove('lit'); menuOwner = null; }
+}
+
+/* 顶栏文件菜单（0.4.2）：「更换文件…」与「新建待办文件…」两枚常驻图标合并成一枚下拉。
+   单击展开、再单击收起；锚在按钮左下角，溢出时由 showMenu 夹回窗口内。
+   两项都走原生对话框，所以文案带省略号。 */
+function toggleFileMenu() {
+  const btn = $('btn-file');
+  if (menuOpen()) { hideMenu(); return; }
+  const r = btn.getBoundingClientRect();
+  showMenu([
+    { label: '打开文件…', fn: chooseFile },
+    { label: '新建文件…', fn: newFile },
+  ], r.left, r.bottom + 2);
+  setMenuOwner(btn);
+}
 
 function menuRow(i, x, y) {
   const ln = S.lines[i];
@@ -969,13 +983,13 @@ function menuBlank(x, y) {
   }], x, y);
 }
 
-/* 原“右键标题栏”菜单（更换文件… / 打开文件位置 / 退出）已整块删除，前两项改由顶栏常驻图标接管
-   （退出已有 ✕）。删而不是修的原因：Tauri 2 注入的 window/scripts/drag.js 在 document 上注册
-   冒泡期 mousedown，命中 data-tauri-drag-region 时 preventDefault + stopImmediatePropagation +
-   invoke start_dragging；它注册得比页面脚本早，所以这里冒泡期的“点菜单外面关掉”永远收不到 ——
-   菜单点开后点标题栏关不掉（四个按钮在 CLICKABLE_TAGS 里，所以点按钮本来就能关）。
-   常驻图标没有开合状态，直接绕开整类问题；右键标题栏现在什么也不发生（全局 contextmenu
-   preventDefault 兜掉 WebView2 默认菜单，见 bindChrome）。 */
+/* 原“右键标题栏”菜单（更换文件… / 打开文件位置 / 退出）已整块删除：前两项现在在顶栏第一枚
+   图标的「文件菜单」下拉里（0.4.2 合并），退出在顶栏 ✕。删而不是修的原因：Tauri 2 注入的
+   window/scripts/drag.js 在 document 上注册冒泡期 mousedown，命中 data-tauri-drag-region 时
+   preventDefault + stopImmediatePropagation + invoke start_dragging；它注册得比页面脚本早，
+   所以这里冒泡期的“点菜单外面关掉”永远收不到 —— 菜单点开后点标题栏关不掉。
+   0.4.2 的文件菜单下拉改用捕获期 pointerdown 绕开这条路径（见 bindChrome）。
+   右键标题栏现在什么也不发生（全局 contextmenu preventDefault 兜掉 WebView2 默认菜单）。 */
 
 /* ---------- 详情面板（todo.pyw:1074-1261） ---------- */
 
@@ -1246,32 +1260,19 @@ async function exitApp() {
 /* 顶栏图标（内联单色 SVG，风格同 GRIP_SVG / boxSvg）：同一个 13px 画布、
    .5 坐标、1px 线，几枚才逐像素对齐。以前 ＋ 📌 ↻ ✕ 用字体字形（14pt / 9pt /
    13pt / 12pt），字号与基线各不相同，顶栏里横竖都错位。
-   更换文件 = 纯文档页（矩形 + 右上折角），不叠箭头 —— 13px 下两笔会糊；
-   打开文件位置 = ↗，与资源管理器“在文件夹中显示”同义；↻ = 圆形箭头，
-   📌 = 24 画布的图钉。后两枚借 24 画布现成路径，线宽 2 随 13/24 缩放成 ~1.1px，
-   与其余 1px 线同重。 */
-const ICON_CHOOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+   文件菜单 = 纯文档页（矩形 + 右上折角），不叠箭头也不叠加号 —— 13px 下多一笔会糊，
+   而且菜单项自己说明是打开还是新建（0.4.2 合并）；
+   打开文件位置 = 闭合文件夹（左边一个抬起的 tab），与资源管理器“在文件夹中显示”同义；
+   📌 = 24 画布的图钉，借 24 画布现成路径，线宽 2 随 13/24 缩放成 ~1.1px，与其余 1px 线同重。 */
+const ICON_FILE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M2.5 1.5H7.5L10.5 4.5V11.5H2.5Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
   + '<path d="M7.5 1.5V4.5H10.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
   + '</svg>';
-const ICON_REVEAL_SVG = '<svg viewBox="0 0 13 13" fill="none">'
-  + '<path d="M3.5 9.5L9.5 3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
-  + '<path d="M6.5 3.5H9.5V6.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>'
-  + '</svg>';
-/* ＋ 换成“文档 + 加号”（用户拍板 b）：13px 下与“更换文件”的纯文档页同族，
-   右下角让出一小块放加号——页纸描边在那里断开，加号才不糊成一团。 */
-const ICON_NEW_SVG = '<svg viewBox="0 0 13 13" fill="none">'
-  + '<path d="M2.5 1.5H7.5L10.5 4.5V7.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
-  + '<path d="M2.5 1.5V11.5H8" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
-  + '<path d="M7.5 1.5V4.5H10.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
-  + '<path d="M10 8.5V12.5M8 10.5H12" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
+const ICON_FOLDER_SVG = '<svg viewBox="0 0 13 13" fill="none">'
+  + '<path d="M1.5 10.5V2.5H5.5V3.5H11.5V10.5Z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
   + '</svg>';
 const ICON_CLOSE_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M3.2 3.2L9.8 9.8M9.8 3.2L3.2 9.8" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>'
-  + '</svg>';
-const ICON_REFRESH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-  + '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>'
-  + '<path d="M21 3v5h-5"/>'
   + '</svg>';
 const ICON_PIN_SVG = '<svg viewBox="0 0 24 24" fill="none">'
   + '<path d="M12 17v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
@@ -1285,8 +1286,9 @@ const ICON_TRASH_SVG = '<svg viewBox="0 0 13 13" fill="none">'
   + '<path d="M3.7 3.5L4.3 10.8H8.7L9.3 3.5" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>'
   + '</svg>';
 
-/* 顶部这枚按钮的状态：有没有可删的、title 报几条。renderList / showMissing 收尾各调一次，
-   所以任何一次重画（装载、勾选、外部改动、撤销）之后它都是新的。 */
+/* 顶部这两枚按钮的状态：有没有可删的、title 报几条；「打开文件位置」能不能用。
+   renderList / showMissing 收尾各调一次，所以任何一次重画（装载、勾选、外部改动、撤销）
+   之后它们都是新的。 */
 function updateClearButton() {
   const btn = $('btn-clear-done');
   if (!btn) return;
@@ -1295,30 +1297,37 @@ function updateClearButton() {
   btn.title = n > 0 ? `删除已完成（${n}）` : '删除已完成';
 }
 
+/* 「打开文件位置」在缺失态置灰（0.4.2）：那时 S.file 指的路径多半不存在，点了只会打开
+   不存在的父目录、或者弹出「文件和目录都不存在」（Rust 的 open_file_location）。 */
+function updateRevealButton() {
+  const btn = $('btn-reveal');
+  if (btn) btn.disabled = !listReady();
+}
+
+/* 顶部两枚会置灰的按钮一起刷：清单换了就都得跟着变。 */
+function updateChrome() {
+  updateClearButton();    // 「删除已完成」的置灰与条数
+  updateRevealButton();   // 「打开文件位置」跟着“有没有文件可显示”走
+}
+
 function bindChrome() {
   const on = (id, fn) => $(id).addEventListener('click', fn);
   on('btn-close', exitApp);
-  on('btn-refresh', refreshFromDisk);
   on('btn-pin', toggleDock);
-  on('btn-new', newFile);
-  // 两个常驻图标接管原“右键标题栏”菜单的前两项。文件缺失（S.missingShown）时两者仍可用：
-  // 更换文件是打开已有 md 的入口，＋ 是新建的入口——缺失状态下这两个按钮就是全部的出路；
-  // ↗ 交给 Rust 侧的“路径不存在”提示，不静默失败。
-  on('btn-choose', chooseFile);
+  // 0.4.2：文件入口合并成一枚下拉。缺文件时它永不置灰——
+  // 「打开文件…」「新建文件…」两项就是缺失状态下全部的出路。
+  on('btn-file', toggleFileMenu);
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
   on('btn-clear-done', deleteCompletedTodos);
-  $('btn-choose').innerHTML = ICON_CHOOSE_SVG;
-  $('btn-reveal').innerHTML = ICON_REVEAL_SVG;
-  // 其余五枚也走同一套注入：HTML 里只留空按钮，图标只在 app.js 有一份定义。
+  // 图标只在 app.js 有一份定义：HTML 里只留空按钮。
   const ICONS = {
-    'btn-new': ICON_NEW_SVG, 'btn-pin': ICON_PIN_SVG,
-    'btn-refresh': ICON_REFRESH_SVG, 'btn-close': ICON_CLOSE_SVG,
+    'btn-file': ICON_FILE_SVG, 'btn-reveal': ICON_FOLDER_SVG,
+    'btn-pin': ICON_PIN_SVG, 'btn-close': ICON_CLOSE_SVG,
     'btn-clear-done': ICON_TRASH_SVG,
   };
   for (const [id, svg] of Object.entries(ICONS)) $(id).innerHTML = svg;
   // Tk 按钮按下不夺焦点（Canvas 无焦点），防止空格键误触
-  for (const id of ['btn-close', 'btn-refresh', 'btn-pin', 'btn-new', 'btn-choose',
-    'btn-reveal', 'btn-clear-done']) {
+  for (const id of ['btn-close', 'btn-pin', 'btn-file', 'btn-reveal', 'btn-clear-done']) {
     $(id).addEventListener('mousedown', (e) => e.preventDefault());
     $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
   }
@@ -1356,10 +1365,17 @@ function bindChrome() {
     e.stopPropagation();
     cleanupDrag();
   }, true);
-  // 点击菜单外关闭（捕获阶段：理由同上，冒泡期会被拖动区处理吞掉，#4）
-  document.addEventListener('mousedown', (e) => {
-    if (!menuEl.contains(e.target)) hideMenu();
+  // 点窗口内别处关闭菜单（捕获期 + pointerdown）。用 pointerdown 而不是 mousedown：
+  // 标题栏的拖动区（data-tauri-drag-region）上，Tauri 注入的 drag.js 会吞掉 mousedown
+  // （见上个注释块），而 pointerdown 比它早，标题栏空白处也关得掉（0.4.2 用户要求）。
+  // 落在菜单自己或菜单归属的那枚按钮上时不关：后者留给 click 去 toggle。
+  window.addEventListener('pointerdown', (e) => {
+    if (!menuOpen() || menuEl.contains(e.target)) return;
+    if (menuOwner && menuOwner.contains(e.target)) return;
+    hideMenu();
   }, true);
+  // 失焦（点到详情面板、别的程序）也收起：下拉菜单挂在那儿等人回来是错的
+  window.addEventListener('blur', hideMenu);
 }
 
 /* ---------- 启动 ---------- */

@@ -26,13 +26,14 @@ export function starterText(nl = '\r\n') {
   return lines.map((t) => t + nl).join('');
 }
 
-/* 缺文件时的提示。图标序号由调用方在运行时按顶栏实际顺序算出来（newIdx/openIdx 从 1 起），
+/* 缺文件时的提示。图标序号由调用方在运行时按顶栏实际顺序算出来（fileIdx 从 1 起），
    所以以后调整顶栏按钮顺序，这句话会自己跟着变，不会指错地方。
-   算不出来（0 或负数）时退化成不带数字的说法，绝不写出"第 0 个"。 */
-export function missingHint(newIdx, openIdx) {
+   0.4.2 起“打开 / 新建”合进同一枚下拉，所以只报一个序号，动作让用户在菜单里选；
+   算不出来（0 或负数）时退化成不带数字的说法，绝不写出“第 0 个”。 */
+export function missingHint(fileIdx) {
   const head = '目前没有打开待办 Markdown 文件。';
-  if (newIdx >= 1 && openIdx >= 1) {
-    return `${head}\n请点击上方的第 ${newIdx} 个图标新建文件，或点击第 ${openIdx} 个图标打开已有文件。`;
+  if (fileIdx >= 1) {
+    return `${head}\n请点击上方的第 ${fileIdx} 个图标，在菜单里选择「打开文件」或「新建文件」。`;
   }
-  return `${head}\n请点击上方新建文件的图标，或点击打开已有文件的图标。`;
+  return `${head}\n请点击上方打开或新建文件的图标，在菜单里选择「打开文件」或「新建文件」。`;
 }

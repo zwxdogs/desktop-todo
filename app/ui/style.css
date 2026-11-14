@@ -69,12 +69,12 @@ body {
 .hbtn:disabled:hover, .hbtn:disabled:active { background: transparent; color: #C6CCD4; }
 #btn-close { margin-right: 6px; }
 
-/* 顶栏七个图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
+/* 顶栏五枚图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
    全部 13px 画布、flex 居中：对齐靠同一个几何框，不靠字体字形的基线与墨迹中心
    —— 之前 ＋ 用 14pt、📌 9pt、↻ 13pt，字号不同还各自带基线偏移，横竖都错位。 */
 .hbtn svg { width: 13px; height: 13px; display: block; }
 
-/* 分组竖线：[更换文件][打开文件位置] | ＋ 📌 ↻ ✕
+/* 分组竖线：[文件菜单][打开文件位置][删除已完成] | 📌 ✕
    pointer-events:none 是硬要求：它是 <span>，没有 data-tauri-drag-region，
    不穿透就在按钮之间留一块 9px 死区（既点不到按钮，也拖不动窗口）；
    穿透后命中 #hdr，等同点标题栏空白，可以拖窗口。
