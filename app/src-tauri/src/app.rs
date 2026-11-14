@@ -154,6 +154,8 @@ pub fn run() {
             crate::commands::app_info,
             crate::commands::read_md,
             crate::commands::write_md,
+            crate::commands::write_md_backup,
+            crate::commands::read_md_backup,
             crate::commands::file_state,
             crate::commands::save_config,
             crate::commands::set_docked,

@@ -1,13 +1,16 @@
-// notice.js — 顶栏那条提示的唯一状态机（#18）。
+// notice.js — 顶栏那条提示的唯一状态机（#18、#20）。
 //
-// 两种消息共用同一处，因为窗口顶部只有一条位置：
-//   ① 写盘失败（persistent）：一直挂着，直到某次写盘成功；点它就重试。
+// 三种消息共用同一处，因为窗口顶部只有一条位置：
+//   ① 写盘失败（persistent、可点）：一直挂着，直到某次写盘成功；点它就重试。
 //   ② 一次性的短消息（info）：约 3 秒自己消失，例如「编辑已丢弃」。
+//   ③ 一次性的错误（error，persistent、**不可点**）：例如「写备份失败，这次没有删除」。
+//      它和 ① 一样要一直挂着——用户得看清为什么没做成——但它没有「点一下就重试」这个动作：
+//      能重试的那件事（再点一次垃圾桶）本来就在界面上，伪装成可点是骗人。
 //
 // 优先级写在这里而不是窗口里：**还没保存成功的时候，一条一闪而过的消息不能把它盖掉**。
 // 这个决定不碰 DOM，所以能用 node --test 守住；画它、定时器、点击都在窗口那边。
 //
-// 状态形状：null | { kind: 'save', text } | { kind: 'info', text, token }
+// 状态形状：null | { kind: 'save', text } | { kind: 'info', text, token } | { kind: 'error', text }
 //   token 由调用方给（每发一条 info 自增）：过期只清自己那一条，
 //   免得「A 的定时器到点把后发的 B 清掉」。
 
@@ -17,12 +20,20 @@ export function nextNotice(state, ev) {
     case 'save-failed':
       // 失败永远接管：哪怕是刚弹出来的短消息，也先让位给「你的改动没写进去」
       return { kind: 'save', text: ev.text };
+    case 'error':
+      // 一次性的失败同样要一直挂着，但它不可点——不能抢掉「写盘失败」那条的位置
+      if (state && state.kind === 'save') return state;
+      return { kind: 'error', text: ev.text };
+    case 'dismiss-error':
+      // 那件事后来做成了（例如重试删除成功）：一条已经在说别的话的提示保持原样
+      return state && state.kind === 'error' ? null : state;
     case 'saved':
-      // 只清写盘那条；info 自己有自己的过期时间，不归保存成功管
+      // 只清写盘那条；info 自己有自己的过期时间，error 也不是「保存成功」能回答的事
       return state && state.kind === 'save' ? null : state;
     case 'info':
       // 写盘失败还挂着时不再刷短消息：两条挤一处，短的那条只会把要紧的盖掉
       if (state && state.kind === 'save') return state;
+      // 但短消息可以接管 error：它是「刚发生的那件事」，比一条旧的失败说明更贴近现在
       return { kind: 'info', text: ev.text, token: ev.token };
     case 'expire':
       // 只清自己那一条：期间换了新消息就什么都不做

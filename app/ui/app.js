@@ -55,6 +55,7 @@ let mainScroll = null;   // 自绘滚动条（0.4.1；bindChrome 里挂到 listE
 const S = {
   lines: [],       // 清单模块那份数组的镜像：每次重绘前由 render 钩子同步
   file: '',        // 最近一次从 Rust 命令采纳的路径：只原样转发给文件类命令，不自己拼
+  loadedFile: '',  // 上一次真装载成功的是哪个文件；装载失败时清单模块的备份归属退回它（#20）
   title: '',       // 与 file 同时采纳的顶栏标题；装载成功后由 loadFile 落字（错误提示只是临时覆盖）
   lastSeen: null,
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
@@ -66,14 +67,21 @@ const S = {
   quitting: false,
 };
 
-/* 清单模块（list.js）：清单的唯一变更入口。八个意图在那边各有唯一实现，撤销栈、
+/* 清单模块（list.js）：清单的唯一变更入口。每个意图在那边都有唯一实现，撤销栈、
    写盘合并窗口、面板锚点、行保真都在模块内部；这里只提供窗口自己的四件事：
    变更前收掉编辑框/面板、重绘、写盘、回执。换行符与 BOM 也由模块持有。 */
 const list = createList({
+  file: null,   // 身份在 adoptFile 里跟着 Rust 回传的路径走（备份要靠它判「是哪个清单」）
   hooks: {
     before: listBefore,
     render: (lines) => { S.lines = lines; renderList(); },
     write: (text) => writeText(text),
+    /* 删除已完成的兜底（#20）：删前写同目录的 `待办-bak.md`，Ctrl+Z 在内存撤销栈
+       被整份重载清掉之后靠它取回。路径由 Rust 从源文件派生，前端不拼文件名。 */
+    backup: {
+      write: (text, hasBom) => invoke('write_md_backup', { file: S.file, content: text, hasBom }),
+      read: () => invoke('read_md_backup', { file: S.file }),
+    },
     afterSave: (ok, n, err) => {
       if (ok) {
         log(`saved ${n} lines`);
@@ -137,11 +145,15 @@ function setTitle(t) { titleEl.textContent = t; titleEl.title = t; }
 /* 采纳 Rust 回传的文件身份（app_info / choose_file / new_md_file）。身份只在 Rust 侧产生
    （Shared.file）；这里存下的 file 只是最近一次回传的投影：原样转发给文件类命令，不自己
    拼路径、不派生标题（#12）。readIdentity 先把字段逐个验过，读不到就抛错（不再静默回退）。
-   标题先不进界面——loadFile 读成功了才落字，免得新文件名配着旧文件的清单一起显示。 */
+   标题先不进界面——loadFile 读成功了才落字，免得新文件名配着旧文件的清单一起显示。
+
+   清单模块那份 file 也在这里换：备份是「哪个清单的备份」，身份一换就作废（#20）。
+   loadFile 的整份替换会再传一次（同值），它只是把这件事绑在「装载」这个动作上。 */
 function adoptFile(raw) {
   const identity = readIdentity(raw);
   S.file = identity.file;
   S.title = identity.title;
+  list.setFile(S.file);
 }
 
 async function statNow() {
@@ -211,11 +223,43 @@ function listBefore(change) {
   }
 }
 
+/* Ctrl+Z（todo.pyw:1009-1023；#20 加了「读回备份」这一层兜底）。
+   顺序不能反：**先走内存撤销栈**。栈里一旦有东西，这次按键就归它——写失败也只报失败，
+   绝不转去读备份（那会把一个更早的状态盖到当前清单上）。只有栈本身交不出来、而本次
+   运行确实做过删除已完成、那批快照已被整份重载清掉时，才走备份。触发条件由清单模块
+   持有（只有它知道那批删除有没有真的发生过），这里只负责把结果说给用户听。 */
 async function undoNow() {
   hideToast();   // 回执只认「刚删完」那一刻：换了撤销目标就先收掉
   if (S.edit || S.panelEditing) return;
-  if (await list.undo()) log(`undo (left ${list.undoSize()} snapshots)`);
-  else log('undo save failed');
+  if (list.canUndo()) {
+    if (await list.undo()) log(`undo (left ${list.undoSize()} snapshots)`);
+    else log('undo save failed');
+    return;
+  }
+  if (!list.canRestoreBackup()) {
+    log('undo: nothing to undo');
+    return;
+  }
+  const r = await list.restoreBackup();
+  if (r.ok) {
+    log('undo from backup');
+    // 文案不写死「待办-bak.md」：文件名跟着当前清单走（检查清单.md → 检查清单-bak.md）
+    showInfoNotice('已取回删除前的清单（来自同目录的 -bak 备份）');
+    return;
+  }
+  if (r.reason === 'read' || r.reason === 'write') {
+    // 读/写失败要说明原因：这是「你的删除退不回来了」，不是一条可以忽略的日志
+    log(`undo from backup failed: ${r.err || r.reason}`);
+    setNotice({
+      type: 'error',
+      text: r.reason === 'write'
+        ? '取回删除前的清单失败：写不进文件，清单没有改动'
+        : `取回删除前的清单失败：读不动同目录的 -bak 备份${r.err ? `（${String(r.err.message || r.err)}）` : ''}`,
+    });
+    return;
+  }
+  // nothing / missing：备份不在了或不作数，这次 Ctrl+Z 就当什么也没发生
+  log(`undo: no snapshot, backup ${r.reason}`);
 }
 
 /* ---------- 文件装载（todo.pyw:565-602） ---------- */
@@ -245,6 +289,9 @@ async function loadFile() {
   list.cancelSave();
   if (!(await fileStateExists())) {
     showMissing();
+    // 装载失败：#20 的备份归属退回「上一次真装载成功的那份」，凭据随之作废
+    // （此时内存里的行仍属于它，而 S.file 已经是另一个文件了）
+    list.setFile(S.loadedFile);
     log(`file missing: ${S.file}`);
     return;
   }
@@ -259,12 +306,15 @@ async function loadFile() {
     } else {
       log(`load error: ${e}`);
     }
+    list.setFile(S.loadedFile);   // 同上传载失败：备份凭据不能挂在没读进来的文件上
     return;
   }
   S.loaded = true;
+  S.loadedFile = S.file;
   setTitle(S.title);   // 装载成功 = 回到当前文件名（清掉上一次「新建失败!」之类的临时提示）
-  // 整份替换：换行符、BOM、撤销栈都交给清单模块，替换本身不写盘（外部改动重载，Tk 同款）
-  list.replaceAll({ lines: md.parseText(data.text), nl: data.nl, hasBom: data.has_bom });
+  // 整份替换：换行符、BOM、撤销栈都交给清单模块，替换本身不写盘（外部改动重载，Tk 同款）。
+  // file 一起带上：装载与「这份清单是哪个文件」是同一件事，两边不该有机会不一致（#20）。
+  list.replaceAll({ lines: md.parseText(data.text), nl: data.nl, hasBom: data.has_bom, file: S.file });
   S.lastSeen = await statNow();
   log(`loaded ${list.lines().length} lines from ${S.file}`);
 }
@@ -564,12 +614,22 @@ function listReady() {
 /* 批量删除已完成（用户拍板）：只看顶层待办自己的勾选，勾了就整块删。
    不弹确认框；删完在窗口底部给一条 3 秒的回执，点它就撤销整批（Q4 A）。
    整批只压一个快照：浮在半空的编辑先落定，之后才是这一批那一个 —— 回执点一下、
-   或 Ctrl+Z 一次就退回去。编辑框与面板的收尾由 listBefore 统一处理。 */
+   或 Ctrl+Z 一次就退回去。编辑框与面板的收尾由 listBefore 统一处理。
+
+   #20：删之前先写同目录的 `待办-bak.md`（清单模块内做）。写不成就不删，并说明原因——
+   宁可这次删不掉，也不能删了没法撤。 */
 async function deleteCompletedTodos() {
   if (!listReady()) return;
   await flushPanel();   // 详情面板里改了一半的先落回来
-  const r = list.deleteCompleted();
+  const r = await list.deleteCompleted();
   if (!r) return;
+  if (!r.ok) {
+    const why = r.err ? String(r.err.message || r.err) : '未知原因';
+    log(`backup failed, delete cancelled: ${why}`);
+    setNotice({ type: 'error', text: `没能写备份文件，这次没有删除：${why}` });
+    return;
+  }
+  setNotice({ type: 'dismiss-error' });   // 上一次没删成的说明到此为止：这次成了
   showToast(`已删除 ${r.n} 条 · Ctrl+Z 撤销`,
     r.unfinished ? `其中 ${r.unfinished} 条待办下有未勾选的子待办` : '',
     undoNow);
@@ -716,7 +776,7 @@ function menuBlank(x, y) {
    为什么需要它：写盘失败以前只进 widget.log，用户看到的是打字、回车、待办正常显示，
    而文件里没有。桌面挂件上「改了却没写进去」必须当场看得见。 */
 const noticeEl = $('notice');
-let noticeState = null;   // null | { kind:'save', text } | { kind:'info', text, token }
+let noticeState = null;   // 形状与迁移全在 notice.js：save / info / error（后两者见那边的注释）
 let noticeTimer = null;
 let noticeToken = 0;
 
@@ -747,6 +807,7 @@ function paintNotice() {
   noticeEl.classList.toggle('show', !!s);
   noticeEl.classList.toggle('kind-save', !!s && s.kind === 'save');
   noticeEl.classList.toggle('kind-info', !!s && s.kind === 'info');
+  noticeEl.classList.toggle('kind-error', !!s && s.kind === 'error');
   noticeEl.title = clickable ? '点这里重试保存' : '';
   // 能点时它是个按钮：不给键盘用户留一个「看得见点不到」的死角
   if (clickable) {
@@ -1143,10 +1204,12 @@ function bindChrome() {
     e.stopPropagation();
     menuBlank(e.clientX, e.clientY);
   });
-  // Ctrl+Z（todo.pyw:510, 1009-1023）
+  // Ctrl+Z（todo.pyw:510, 1009-1023；#20：内存栈交不出来时才允许走备份）
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-      if (S.edit || S.panelEditing || !list.canUndo()) return;
+      // 两个来源有一个能用就接过这次按键：光看栈会把「备份还能取回」那条路挡死
+      if (!list.canUndo() && !list.canRestoreBackup()) return;
+      if (S.edit || S.panelEditing) return;
       e.preventDefault();
       undoNow();
     } else if (e.key === 'Escape') {

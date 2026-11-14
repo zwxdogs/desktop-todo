@@ -1,5 +1,6 @@
 // list.js — 清单模块（app/ui）：清单的全部变更入口。
-// 八个意图：勾选 / 改字 / 插入 / 删除 / 搬块 / 删除已完成 / 整份替换 / 撤销。
+// 变更意图：勾选 / 改字 / 插入 / 删除 / 搬块 / 删除已完成 / 整份替换 / 撤销，
+// 外加「撤销」那条路上的兜底 restoreBackup（读回 待办-bak.md，#20）。
 // 模块内部包着撤销栈（todo.pyw:1000-1023）、写盘合并窗口（todo.pyw:1026-1038）、
 // 面板锚点（todo.pyw:892-896）与行保真；主窗口与详情面板的入口只调意图，
 // 不再各自排「压撤销 → 改行 → 重绘 → 排写盘」。
@@ -15,11 +16,17 @@ import { createUndoStack } from './undo.js';
      render(lines)    重绘（安静变更不走，例如编辑器失焦的静默提交）。
      write(text)      写盘，返回 Promise<boolean>；撤销要先写成功再换内存。
      afterSave(ok, n, err) 合并写盘的结果：成功记条数，失败记错误文本。
-     onSnapshot()     压快照的副产物（回执浮层只认「刚删完」那一刻）。 */
+     onSnapshot()     压快照的副产物（回执浮层只认「刚删完」那一刻）。
+     backup           删除已完成的兜底端口（#20）：{ write(text, hasBom), read() }。
+                      write 写同目录一份 `-bak`（覆盖，只留一份），read 读回来
+                      `{ text, nl, has_bom }` 或 null。缺省时没有备份可用——
+                      测试与任何不需要兜底的场景都不用给。 */
 export function createList(opts = {}) {
   let lines = opts.lines || [];
   let nl = opts.nl || '\n';
   let hasBom = !!opts.hasBom;
+  // 这份清单对应哪个文件（只有备份路径要靠它：切文件就整组作废）。
+  let file = opts.file === undefined ? null : opts.file;
   const hooks = opts.hooks || {};
   const debounceMs = opts.debounceMs === undefined ? 250 : opts.debounceMs;
   const cap = opts.cap === undefined ? 50 : opts.cap;
@@ -27,6 +34,23 @@ export function createList(opts = {}) {
   let saveTimer = null;
   // 详情面板盯着的待办：行锚（见下面「行锚点」），重定位归本模块，窗口由入口开。
   let panel = null;
+
+  /* 备份的账（#20）。**只活在内存里**，进程一起来就是空的——这正是「重启后
+     Ctrl+Z 不会复活上一次运行遗留的旧备份」那条验收的实现方式：凭据不存在，
+     就没有任何一条代码路径会去读盘。
+
+       backupFile   写备份时的那个文件。与当前 file 不一致即作废。
+       backupPending 本次运行里「删除已完成」写过备份、且这份备份还没被消费。
+       armedSnap    那一批删除压进撤销栈的**那份快照原文**。备份的内容跟它是同一份
+                    （删除之前整份清单），所以「撤销恢复回来的正好是它」＝那批删除已经
+                    回到内存里了，凭据该消费。用原文比对而不是栈深：栈深会被「弹出去了
+                    但写盘失败」「撤掉的是无关的一笔」这两种情况带偏，原文不会。 */
+  let backupFile = null;
+  let backupPending = false;
+  let armedSnap = null;
+  /* 「恢复备份」压的那份快照要连编码一起撤回：键是压进去之后栈里的位置，值是恢复前的
+     {nl, hasBom}。快照本身只存文本，所以这份附加信息单独记，用一次就删。 */
+  const restoreCoding = new Map();
 
   const text = () => md.serialize(lines);
 
@@ -154,7 +178,7 @@ export function createList(opts = {}) {
     if (o.save !== false) scheduleSave();
   }
 
-  /* ---------- 八个意图 ---------- */
+  /* ---------- 变更意图（八个）+ 读回备份的兜底 ---------- */
 
   function toggle(i) {
     if (!(i >= 0 && i < lines.length)) return false;
@@ -215,17 +239,101 @@ export function createList(opts = {}) {
     return true;
   }
 
-  function deleteCompleted() {
+  /* ---------- 删除已完成的兜底（#20） ----------
+     删之前先把整份清单写到同目录的 `待办-bak.md`（只留一份，每次覆盖）。删完之后
+     整份重载会把撤销栈整个换新，那批删除就再也退不回来了——备份是那条路上的唯一凭据。
+
+     为什么凭据要放在内存里、而且要这么窄（见文件头的 hooks 注释）：光凭「撤销栈是空的」
+     就去读备份，会把几天前某次删除的旧状态复活进当前清单，比丢一次删除更糟。
+     所以只有「本次运行里刚刚真的写过这份备份、而它还没被消费」这一个条件成立时才读盘。 */
+
+  /* 这次 Ctrl+Z 之外，还有没有一条「读回备份」的路可走（界面据此决定要不要接过按键）。
+
+     三个条件缺一不可：本次运行真的写过备份（`backupPending`）、有端口可用、
+     而且写它的那个清单就是当前这个（`backupFile === file`；`file` 只是归属凭据，
+     不参与路径计算——路径由 Rust 从源文件路径派生，所以 null 也是合法归属）。 */
+  function canRestoreBackup() {
+    return backupPending && !!hooks.backup && backupFile === file;
+  }
+
+  /** 那批删除已经从内存撤销栈里退回来了：备份就此作废，别让同一件事能做两遍。 */
+  function consume() {
+    backupPending = false;
+    armedSnap = null;
+  }
+
+  /* 换掉「这份清单是哪个文件」。备份属于某个具体文件，换了就整组作废——
+     甲.md 的 Ctrl+Z 绝不能把 甲-bak.md 的内容搬进 乙.md（#20）。
+     入口在换身份的那一刻调（adoptFile），不等整份重载：装载失败时清单还挂着旧内容，
+     但它的备份凭据已经不该算数了。 */
+  function setFile(next) {
+    if (next === file) return;
+    file = next;
+    consume();
+  }
+
+  async function deleteCompleted() {
     const blocks = md.completedScan(lines);
     if (!blocks.length) return null;
     before({ kind: 'deleteCompleted', blocks });
+    const prior = text();          // 这一批删除之前的完整清单：备份与快照是同一份内容
+    // 备份写不成就不删：宁可这一次删不掉，也不能删了没法撤
+    if (hooks.backup) {
+      try {
+        await hooks.backup.write(prior, hasBom);
+      } catch (e) {
+        return { ok: false, err: e };
+      }
+      backupFile = file;
+      backupPending = true;
+    }
     snapshot();
+    // 凭据认的是「那批删除的那份快照」，不是栈深（见 backupPending 那里的注释）
+    armedSnap = prior;
     // 被整批删掉的那些行：面板锚若落在其中，同样明确作废
     for (const b of blocks) killAnchorIn(panel, b.i, b.end);
     lines = md.deleteCompleted(lines);
     const unfinished = blocks.filter((b) => b.unfinished > 0).length;
     afterChange({ kind: 'deleteCompleted' }, false);
-    return { n: blocks.length, unfinished };
+    return { ok: true, n: blocks.length, unfinished };
+  }
+
+  /* 读回备份（Ctrl+Z 的兜底）。**只在内存撤销栈交不出来、而本次运行确实做过删除已完成**
+     时才走到这里；调用方仍要先问 canRestoreBackup。
+
+     顺序与 undo 一致：先写成功再换内存——写不进去就什么都不动，界面照旧说「没恢复」。
+     恢复本身也压一个快照，所以它自己也能被 Ctrl+Z 撤回（第二次按是回到恢复前）；
+     代价是 undo() 必须连 BOM/换行符一起还原，否则撤回「恢复」会顺手把文件的 BOM 改掉。 */
+  async function restoreBackup() {
+    if (!canRestoreBackup()) return { ok: false, reason: 'nothing' };
+    if (undoStack.canUndo()) return { ok: false, reason: 'undoable' };
+    let got;
+    try {
+      got = await hooks.backup.read();
+    } catch (e) {
+      return { ok: false, reason: 'read', err: e };   // 被占着是暂时的：凭据留着下次再试
+    }
+    if (!got) {
+      consume();                                      // 盘上那份没了：没有就是没有
+      return { ok: false, reason: 'missing' };
+    }
+    // 备份里那份的 BOM/换行符：恢复前后都要能还原，所以先算出来，失败时原样退回
+    const nextNl = got.nl || nl;
+    const nextBom = !!got.has_bom;
+    let ok = false;
+    try { ok = await hooks.write(got.text); } catch (_) { ok = false; }
+    if (!ok) return { ok: false, reason: 'write' };   // 什么都还没动，连 cancelSave 都没做
+    cancelSave();                                     // 写进去了：排着的那次旧写盘作废
+    // 恢复会换掉换行符与 BOM，而快照只存文本；把「恢复前这一份的编码」记在快照旁边，
+    // 撤回这一步时才换得回来（见 undo 里的 restoreCoding）
+    undoStack.push(text());
+    restoreCoding.set(undoStack.size(), { nl, hasBom });
+    lines = md.parseText(got.text);
+    nl = nextNl;
+    hasBom = nextBom;
+    consume();
+    afterChange({ kind: 'restoreBackup' }, false, { save: false });
+    return { ok: true };
   }
 
   /* 整份替换：装载文件、外部改动重读。撤销历史与待落盘的旧内容一起作废。
@@ -236,6 +344,7 @@ export function createList(opts = {}) {
     if (next.lines) lines = next.lines;
     if (next.nl !== undefined) nl = next.nl;
     if (next.hasBom !== undefined) hasBom = !!next.hasBom;
+    if (next.file !== undefined) file = next.file;
     undoStack = createUndoStack(cap);
     if (hooks.render) hooks.render(lines);
   }
@@ -243,16 +352,31 @@ export function createList(opts = {}) {
   /* 撤销：先写成功再换内存（写失败就什么也不动，与现状一致）。
      写完不排写盘 —— 内存换成的就是刚写下去的那一份。
      撤销回来的是重新解析的一批新对象：旧锚的 ① 一定失效，只剩按内容认领；
-     认不出或撞上同名的两条就交不出来（-1），绝不退回旧下标。 */
+     认不出或撞上同名的两条就交不出来（-1），绝不退回旧下标。
+
+     快照本身只存文本（换行符与 BOM 是「这个文件」的属性，不是某一步操作的属性）。
+     唯一的例外是「恢复备份」压的那一份：它会同时换掉换行符与 BOM，撤回时也得换回来，
+     否则第二次 Ctrl+Z 会顺手把文件编码改掉（#20 验收：BOM 与换行符要跟备份走）。 */
   async function undo() {
     if (!undoStack.canUndo()) return false;
     const snap = undoStack.undo();
     if (hooks.write) {
       let ok = false;
       try { ok = await hooks.write(snap); } catch (_) { ok = false; }
+      // 写不进去 = 这次撤销没发生：快照照 Tk 语义已经弹出了，但内存一个字没动，
+      // 备份凭据也不能动——那批删除此刻仍然只在备份里（#20）
       if (!ok) return false;
     }
     lines = md.parseText(snap);
+    // 撤回来的正好是「恢复备份」压的那一份：编码也要跟着撤回去（#20）
+    const coding = restoreCoding.get(undoStack.size() + 1);
+    if (coding) {
+      nl = coding.nl;
+      hasBom = coding.hasBom;
+      restoreCoding.delete(undoStack.size() + 1);
+    }
+    // 撤回来的正好是「删除已完成」之前那一份：那批删除回到内存里了，备份就此消费
+    if (backupPending && armedSnap !== null && snap === armedSnap) consume();
     afterChange({ kind: 'undo' }, false, { save: false });
     return true;
   }
@@ -265,10 +389,12 @@ export function createList(opts = {}) {
     cancelSave,
     canUndo: () => undoStack.canUndo(),
     undoSize: () => undoStack.size(),
+    canRestoreBackup,
+    setFile,
     anchorAt,
     indexOfAnchor,
     setPanel,
     panelIndex,
-    toggle, setText, insert, remove, move, deleteCompleted, replaceAll, undo,
+    toggle, setText, insert, remove, move, deleteCompleted, restoreBackup, replaceAll, undo,
   };
 }

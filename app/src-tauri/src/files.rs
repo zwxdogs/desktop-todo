@@ -102,6 +102,65 @@ pub fn write(path: &Path, content: &str, has_bom: bool) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("replace: {}", e))
 }
 
+/// 删除已完成的兜底（#20）：备份文件的路径。
+///
+/// 命名规则写死在票里：取**最后一个 `.` 之前**为主名，扩展名保留，主名后加 `-bak`。
+/// `待办.md` → `待办-bak.md`；无扩展名直接追加（`待办` → `待办-bak`）。
+/// 源文件自己叫 `待办-bak.md` 时备份为 `待办-bak-bak.md`——追加而不是替换，
+/// 所以**永远不会等于源文件自己**。
+///
+/// 只有前导点的名字（`.md`）不算扩展名：`Path::file_stem` 对 `.md` 返回 `.md`、
+/// `extension` 返回 None，与「最后一个 `.` 之前」这条手工规则在这一点上一致，
+/// 因此这里直接用 Path 的两个方法，不自己切字符串。
+pub fn backup_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let ext = path.extension().map(|s| s.to_string_lossy().into_owned());
+    let name = match (stem, ext) {
+        (Some(stem), Some(ext)) => format!("{}-bak.{}", stem, ext),
+        (Some(stem), None) => format!("{}-bak", stem),
+        // 没有文件名（路径以 `..` 之类结尾）：原样拼，调用方本来就该先检查
+        (None, _) => format!("{}-bak", path.display()),
+    };
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// 写备份：与源文件同目录、只留一份（每次覆盖）。
+///
+/// 走的是与主文件同一个原子写路径（`write` 的 tmp + rename），所以 BOM、换行符、
+/// 「写到一半崩掉不会留下半份」这三条保证与主文件完全一致。
+pub fn write_backup(src: &Path, content: &str, has_bom: bool) -> Result<(), String> {
+    write(&backup_path(src), content, has_bom)
+}
+
+/// 读备份（Ctrl+Z 在内存撤销栈被整份重载清掉之后的兜底）。
+///
+/// 三种结果分得开，因为界面对它们的处置完全不同：
+///   `Ok(None)`      —— 没有备份（从没删过 / 用户自己删了它）：凭据作废，没什么可试的。
+///   `Err(why)`      —— 有，但读不动（被占用 / 没权限 / 不是 UTF-8）：凭据留着，下次再试。
+///   `Ok(Some(out))` —— 读到了。
+///
+/// 「这份备份是不是我写的那一份」不靠文件时间戳判：凭据在内存里（`list.js` 的
+/// `backupPending` / `backupFile`），进程一起来就是空的，所以重启后不会复活旧备份。
+#[derive(Serialize, Debug)]
+pub struct BackupOut {
+    pub text: String,
+    pub has_bom: bool,
+    pub nl: String,
+}
+
+pub fn read_backup(src: &Path) -> Result<Option<BackupOut>, String> {
+    let target = backup_path(src);
+    // 先看有没有：不存在是常态（从没删过已完成），不该报成一次读失败
+    if stat(&target).is_none() {
+        return Ok(None);
+    }
+    let out = read(&target)?;
+    Ok(Some(BackupOut { text: out.text, has_bom: out.has_bom, nl: out.nl }))
+}
+
 /// explorer 的命令行只认**反斜杠分隔的绝对路径**：拿 `E:/项目/待办.md` 这种正斜杠路径喂 `/select,`，
 /// 参数被当成非法，explorer 干脆打开自己的默认文件夹（这台机器上是「桌面」），既不进父目录也不选中文件
 /// —— 2026-11-14 用户报的「点打开文件位置，没找到相应的 md」就是这个。config.json 里那条路径是 Tk 时代
@@ -318,6 +377,130 @@ mod write_failure_tests {
         // 路径本身不合法
         assert!(!is_permission_failure("write: 系统找不到指定的路径。 (os error 3)"));
         assert!(!is_permission_failure(""));
+    }
+}
+
+// 删除已完成的兜底（#20）：同目录一份 `-bak`，只留一份、每次覆盖；绝不盖住源文件自己。
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    fn bak(p: &str) -> PathBuf {
+        backup_path(Path::new(p))
+    }
+
+    #[test]
+    fn backup_keeps_the_extension_and_adds_dash_bak_to_the_stem() {
+        assert_eq!(bak("E:\\项目\\待办.md"), PathBuf::from("E:\\项目\\待办-bak.md"));
+        assert_eq!(bak("E:\\项目\\清单.MD"), PathBuf::from("E:\\项目\\清单-bak.MD"));
+        // 主名按最后一个 `.` 切：a.b.md 的主名是 a.b
+        assert_eq!(bak("E:\\项目\\a.b.md"), PathBuf::from("E:\\项目\\a.b-bak.md"));
+        // 同目录：目录部分原样带过去
+        assert_eq!(bak("E:\\项目\\子目录\\周报.md"), PathBuf::from("E:\\项目\\子目录\\周报-bak.md"));
+    }
+
+    #[test]
+    fn no_extension_gets_bak_appended() {
+        assert_eq!(bak("E:\\项目\\待办"), PathBuf::from("E:\\项目\\待办-bak"));
+        // `.md` 这种只有前导点的名字按 Path 没有扩展名（file_stem 是 `.md`）
+        assert_eq!(bak("E:\\项目\\.md"), PathBuf::from("E:\\项目\\.md-bak"));
+    }
+
+    #[test]
+    fn a_file_that_already_ends_with_bak_gets_another_one() {
+        // 源文件自己就叫 待办-bak.md：备份落 待办-bak-bak.md，绝不覆盖源文件
+        assert_eq!(bak("E:\\项目\\待办-bak.md"), PathBuf::from("E:\\项目\\待办-bak-bak.md"));
+        assert_eq!(bak("E:\\项目\\待办-bak-bak.md"), PathBuf::from("E:\\项目\\待办-bak-bak-bak.md"));
+    }
+
+    #[test]
+    fn the_backup_never_lands_on_the_source_itself() {
+        for p in ["E:\\项目\\待办.md", "E:\\项目\\待办", "待办.md", "E:\\项目\\待办-bak.md"] {
+            assert_ne!(bak(p), Path::new(p), "备份路径不能等于源文件：{}", p);
+            assert_eq!(bak(p).parent(), Path::new(p).parent(), "必须与源文件同目录");
+        }
+    }
+
+    #[test]
+    fn writing_twice_overwrites_and_leaves_one_file_with_bom_and_nl() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("file-backup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("待办.md");
+        std::fs::write(&src, "- [x] 旧\n").unwrap();
+
+        // 第一次：删除前的完整清单，BOM + CRLF 都要照抄
+        write_backup(&src, "- [x] 甲\r\n- [ ] 乙\r\n", true).unwrap();
+        let target = dir.join("待办-bak.md");
+        let raw = std::fs::read(&target).unwrap();
+        assert_eq!(&raw[..3], &[0xEF, 0xBB, 0xBF], "BOM 要保留");
+        assert_eq!(String::from_utf8(raw[3..].to_vec()).unwrap(), "- [x] 甲\r\n- [ ] 乙\r\n");
+
+        // 第二次：覆盖，目录里始终只有一份
+        write_backup(&src, "- [x] 丙\n", false).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("-bak"))
+            .collect();
+        assert_eq!(names, vec!["待办-bak.md".to_string()], "只留一份，且不留 tmp");
+        assert_eq!(read(&target).unwrap().text, "- [x] 丙\n");
+        assert!(!read(&target).unwrap().has_bom, "第二次不带 BOM 就不写 BOM");
+
+        // 源文件一个字都没动
+        assert_eq!(read(&src).unwrap().text, "- [x] 旧\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_a_missing_backup_says_nothing_there() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("file-backup-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_backup(&dir.join("待办.md")).unwrap().is_none(), "没有备份就是 None，不是空内容");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_that_cannot_be_read_is_an_error_not_an_absence() {
+        // 「有，但读不动」与「没有」要分得开：前者凭据该留着下次再试，后者该直接作废
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("file-backup-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("待办.md");
+        std::fs::write(&src, "- [ ] 现在的\n").unwrap();
+        // 备份存在，但不是 UTF-8：read 会回 "utf8: ..."
+        std::fs::write(backup_path(&src), [0xFF, 0xFE, 0x00]).unwrap();
+
+        let err = read_backup(&src).unwrap_err();
+        assert!(err.starts_with("utf8"), "读不动的备份要报原因：{}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_a_backup_hands_back_what_the_frontend_needs_to_restore() {
+        // 前端恢复时只要三样：内容、BOM、换行符——它不靠时间戳判「这是不是我写的那份」
+        // （凭据在内存里，见 list.js 的 backupPending），所以备份状态不必回传
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("file-backup-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("待办.md");
+        std::fs::write(&src, "- [ ] 现在的\n").unwrap();
+
+        write_backup(&src, "- [x] 删前的\r\n", true).unwrap();
+        let got = read_backup(&src).unwrap().expect("刚写过的备份要能读回来");
+        assert_eq!(got.text, "- [x] 删前的\r\n");
+        assert_eq!(got.nl, "\r\n", "换行符跟着备份文件走");
+        assert!(got.has_bom, "BOM 也要交出来");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

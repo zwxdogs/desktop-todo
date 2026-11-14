@@ -52,18 +52,36 @@ pub async fn read_md(file: String) -> Result<ReadOut, String> {
 /// 其余的失败只进提示条——以前它把任何写失败都判成这一类，磁盘满时会建议人去搬文件夹。
 #[tauri::command]
 pub async fn write_md(app: tauri::AppHandle, file: String, content: String, has_bom: bool) -> Result<(), String> {
-    match files::write(Path::new(&file), &content, has_bom) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            Host::of(&app).warn_readonly(&e);
-            Err(e)
-        }
-    }
+    written(&app, files::write(Path::new(&file), &content, has_bom))
+}
+
+/// 两条写路径的收尾一模一样：成功回 `Ok(())`，失败先过 `warn_readonly`（只对权限类弹框并去重）
+/// 再把原因原样交给前端。收在一处，免得将来只改到其中一条。
+fn written(app: &tauri::AppHandle, res: Result<(), String>) -> Result<(), String> {
+    res.inspect_err(|e| Host::of(app).warn_readonly(e))
 }
 
 #[tauri::command]
 pub async fn file_state(file: String) -> Option<FileState> {
     maintenance::file_state(&file)
+}
+
+/// 删除已完成的兜底（#20）：删之前先把整份清单写到同目录的 `待办-bak.md`。
+///
+/// 与 `write_md` 同一条原子写路径、同一套 BOM/换行保留，失败原因也照样抛给前端——
+/// 界面上要说清「为什么这次没能删」，而不是「删除失败」四个字。
+/// 路径由 Rust 从源文件派生（`files::backup_path`），前端不拼文件名。
+#[tauri::command]
+pub async fn write_md_backup(app: tauri::AppHandle, file: String, content: String, has_bom: bool) -> Result<(), String> {
+    written(&app, files::write_backup(Path::new(&file), &content, has_bom))
+}
+
+/// 读回 `待办-bak.md`（Ctrl+Z 在内存撤销栈被整份重载清掉之后的兜底）。
+/// 没有备份回 `None`——「不存在」与「存在但是空的」是两件事。
+/// 读不动（被占用 / 没权限）把原因抛出去：文件被占着是暂时的，凭据要留着下次再试。
+#[tauri::command]
+pub async fn read_md_backup(file: String) -> Result<Option<files::BackupOut>, String> {
+    files::read_backup(Path::new(&file))
 }
 
 #[tauri::command]

@@ -111,6 +111,9 @@ body {
 /* 只有写盘失败那条能点：点它 = 重试保存 */
 #notice.kind-save { background: #FDECEA; color: #9B2C2C; cursor: pointer; }
 #notice.kind-save:hover { background: #FBDDD9; }
+/* 一次性的失败（#20 写备份失败 / 取回失败）：与写盘失败同色要一直挂着，但**不可点**——
+   能重试的那件事（再点一次垃圾桶、再按一次 Ctrl+Z）本来就在界面上，伪装成可点是骗人。 */
+#notice.kind-error { background: #FDECEA; color: #9B2C2C; }
 
 /* ---------- 清单区（0.4.1 起是全窗口唯一的滚动容器） ---------- */
 #list {

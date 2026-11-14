@@ -133,25 +133,25 @@ test("搬块：合法时整块搬走，撤销能回去", async () => {
   assert.equal(list.text(), src);
 });
 
-test("删除已完成：整批只压一个快照，报数与未勾子待办数", () => {
+test("删除已完成：整批只压一个快照，报数与未勾子待办数", async () => {
   const { list, calls } = mk(SRC);
-  const r = list.deleteCompleted();
-  assert.deepEqual(r, { n: 1, unfinished: 0 });
+  const r = await list.deleteCompleted();
+  assert.deepEqual(r, { ok: true, n: 1, unfinished: 0 });
   assert.equal(calls.snap, 1);
   assert.equal(list.text(), "**工作**\n- [ ] 甲\n  - [x] 甲一\n- [ ] 乙\n\n**生活**\n");
   assert.equal(list.pending(), true);
 });
 
-test("删除已完成：没有命中时什么都不做", () => {
+test("删除已完成：没有命中时什么都不做", async () => {
   const { list, calls } = mk("**组**\n- [ ] 甲\n");
-  assert.equal(list.deleteCompleted(), null);
+  assert.equal(await list.deleteCompleted(), null);
   assert.equal(calls.snap, 0);
   assert.equal(calls.render, 0);
 });
 
-test("删除已完成：父项没勾时子项不动", () => {
+test("删除已完成：父项没勾时它下面的子待办不动", async () => {
   const { list } = mk("- [ ] 父\n  - [x] 子\n");
-  assert.equal(list.deleteCompleted(), null);
+  assert.equal(await list.deleteCompleted(), null);
   assert.equal(list.text(), "- [ ] 父\n  - [x] 子\n");
 });
 
