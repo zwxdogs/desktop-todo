@@ -15,6 +15,7 @@ import { readIdentity } from './identity.js';
 import { createRowDrag, mainDropTarget, GRIP_SVG } from './rowdrag.js';
 import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
+import { connect, MAIN, requireHost } from './panelproto.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -29,9 +30,14 @@ window.addEventListener('unhandledrejection', (ev) => {
   } catch (_) { /* ignore */ }
 });
 
-/* __TAURI__ 注入时机与 module 执行存在竞态：不在顶层缓存对象，全部惰性访问 */
-const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args || {});
-const emitTo = (target, event, payload) => window.__TAURI__.event.emitTo(target, event, payload);
+/* 宿主对象由 Tauri 的初始化脚本在页面脚本**之前**写好（withGlobalTauri），
+   所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。 */
+let HOST = null;
+function host() {
+  if (!HOST) HOST = requireHost();
+  return HOST;
+}
+const invoke = (cmd, args) => host().core.invoke(cmd, args || {});
 
 const $ = (id) => document.getElementById(id);
 const listEl = $('list');
@@ -49,9 +55,7 @@ const S = {
   loaded: false,   // 内存里的清单是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
   edit: null,            // { index, input, handle }
   panelOpen: false,
-  panelTodo: -1,
-  panelEditing: false,   // 面板窗口里有未提交编辑（Tk p_edit_entry 非空）
-  commitWaiter: null,    // requestPanelCommit 的应答槽
+  panelEditing: false,   // 面板窗口里有未提交编辑
   quitting: false,
 };
 
@@ -472,7 +476,7 @@ document.addEventListener('mousedown', (e) => {
   if (e.target && e.target.closest && e.target.closest('.plus-add')) return;
   setTimeout(() => {
     if (S.edit) commitEdit();
-    if (S.panelEditing) emitTo('panel', 'panel-commit', {});
+    if (S.panelEditing) flushPanel();
   }, 0);
 }, true);
 
@@ -503,7 +507,7 @@ function listReady() {
    或 Ctrl+Z 一次就退回去。编辑框与面板的收尾由 listBefore 统一处理。 */
 async function deleteCompletedTodos() {
   if (!listReady()) return;
-  await requestPanelCommit();   // 详情面板里改了一半的先落回来
+  await flushPanel();   // 详情面板里改了一半的先落回来
   const r = list.deleteCompleted();
   if (!r) return;
   showToast(`已删除 ${r.n} 条 · Ctrl+Z 撤销`,
@@ -647,23 +651,40 @@ function menuBlank(x, y) {
    0.4.2 的文件菜单下拉改用捕获期 pointerdown 绕开这条路径（见 bindChrome）。
    右键标题栏现在什么也不发生（全局 contextmenu preventDefault 兜掉 WebView2 默认菜单）。 */
 
-/* ---------- 详情面板（todo.pyw:1074-1261） ---------- */
+/* ---------- 详情面板（todo.pyw:1074-1261；#16 起跨窗只走 panelproto.js） ----------
+   这里只回答「面板的每个操作在清单上是什么」以及「面板该看到哪些行」。
+   消息名、方向、字段、握手与落定都在协议模块里，两边共用同一张表。 */
+
+/* 协议端：宿主对象与 log 从这里注入，收消息的处理函数在 boot 里一次装齐。 */
+const panel = connect({ side: MAIN, getHost: host, log, flushTimeoutMs: 800 });
 
 function openPanel(i) {
   list.setPanel(i);
   S.panelOpen = true;
   invoke('panel_open');
+  panel.announce();   // 面板窗口比主窗口晚建：要用了就再喊一声 hello
   pushPanelData();
 }
 
 function closePanel() {
   if (!S.panelOpen) return;
   S.panelOpen = false;
+  S.panelEditing = false;
   list.setPanel(-1);
-  resolveCommit();
   invoke('panel_close');
-  emitTo('panel', 'panel-hide', {});
+  panel.send('hide', {});
   log('panel closed');
+}
+
+/* 收起面板，但先把面板里未提交的编辑落回清单（#16 验收：关面板不丢字）。
+   Tk close_panel 开头就是 _commit_edits，这里是它的跨窗口等价物。
+   「面板里到底有没有没提交的字」由面板自己的 editing 通知维护：没有就直接收，
+   有才走一趟落定（面板卡死时最多等一次告警，不会每次关面板都卡）。
+   正在编辑的那行被删掉时走裸 closePanel —— 那时用户要的就是丢掉，与 Tk 同款。 */
+async function closePanelSaving() {
+  if (!S.panelOpen) return;
+  if (S.panelEditing) await flushPanel();
+  closePanel();
 }
 
 function refreshPanel(focusIdx) {
@@ -681,7 +702,7 @@ function pushPanelData(focusIdx) {
   }
   const lines = list.lines();
   const [todos, notes] = md.panelParts(lines, i);
-  emitTo('panel', 'panel-data', {
+  panel.send('data', {
     title: lines[i].text,
     todos: todos.map((j) => ({ j, checked: lines[j].checked, text: lines[j].text })),
     notes: notes.map((j) => ({ j, text: lines[j].text })),
@@ -689,73 +710,53 @@ function pushPanelData(focusIdx) {
   });
 }
 
-/* 面板编辑需先落定再动清单（Tk _commit_edits 的跨窗口等价物） */
-function requestPanelCommit() {
-  if (!S.panelOpen) return Promise.resolve();
-  const p = new Promise((res) => { S.commitWaiter = res; });
-  emitTo('panel', 'panel-commit', {});
-  setTimeout(() => { if (S.commitWaiter === res) { S.commitWaiter = null; res(); } }, 400);
-  return p;
+/* 面板编辑需先落定再动清单（Tk _commit_edits 的跨窗口等价物）。
+   #16：等面板的显式回执，回执里带着它本来要提交的操作——照着落，不猜。
+   回执没来（面板页卡住/没了）只留一条告警，不再用 400ms 墙钟假装提交成功。 */
+async function flushPanel() {
+  if (!S.panelOpen) return;
+  if (!panel.peerReady()) return;   // 面板页还没握上手：没有它可以交的东西
+  const ops = await panel.flush();
+  if (ops === null) return;   // 只告警；此时面板的编辑仍留在它自己那儿
+  for (const op of ops) applyPanelOp(op);
 }
 
-function resolveCommit() {
-  if (S.commitWaiter) { const r = S.commitWaiter; S.commitWaiter = null; r(); }
-}
+/* 面板发来的每一个操作的处理函数：表里一条，这里一条，没有第三种说法。
+   落定回执里的操作也走这里，所以「直发」与「回执」落的是同一条路径。 */
+const PANEL_HANDLERS = {
+  toggle: (m) => toggleLine(m.j),
+  // Tk p_edit commit(1323-1333)：改这一行文字，其余交给清单模块
+  setText: (m) => list.setText(m.j, m.value),
+  // 取消编辑：文字没变，重推一轮内容把输入框换回来
+  discardEdit: () => refreshPanel(),
+  remove: (m) => deleteLine(m.j),
+  addTodo: () => pAddTodo(),
+  addNote: () => pAddNote(),
+  // ADR 0007：面板行上的加号——在该行下方插一条同类条目（缩进原样抄这一行）
+  addBelow: (m) => pAddBelow(m.kind, m.j),
+  move: (m) => {
+    // 0.4.0：面板里拖动排序（只在同一栏内，跨栏不合法）。真搬行只在这里做。
+    const to = m.where === 'before' ? m.anchor : md.blockEnd(list.lines(), m.anchor);
+    if (list.move(m.from, to)) log(`panel drag move ${m.from} -> ${to}`);
+  },
+  rename: (m) => {
+    // Tk p_rename commit(1379-1393)：锚点跟着改过的标题走（setText 的收尾会刷新锚）
+    const i = list.panelIndex();
+    if (i >= 0) list.setText(i, m.value);
+  },
+  discardRename: () => refreshPanel(),
+  /* 面板自己请求收起：它在发这条之前已经 commitPending 把未定稿的编辑交出来了
+     （setText / rename 先走一条），所以这里只收窗口，不再反向要一次落定。 */
+  close: () => closePanel(),
+  // 面板里有未提交的编辑：主窗口据此放过 Ctrl+Z 与退出前的收尾
+  editing: (m) => { S.panelEditing = !!m.on; },
+};
 
-function panelReqHandler(ev) {
-  const d = ev.payload || {};
-  switch (d.type) {
-    case 'toggle':
-      toggleLine(d.j);
-      break;
-    case 'edit-commit':
-      // Tk p_edit commit(1323-1333)：改这一行文字，其余交给清单模块
-      list.setText(d.j, d.value);
-      resolveCommit();
-      break;
-    case 'edit-cancel':
-    case 'rename-cancel':
-      resolveCommit();
-      refreshPanel();
-      break;
-    case 'rename': {
-      // Tk p_rename commit(1379-1393)：锚点跟着改过的标题走（setText 的收尾会刷新锚）
-      const i = list.panelIndex();
-      if (i >= 0) list.setText(i, d.value);
-      resolveCommit();
-      break;
-    }
-    case 'delete':
-      deleteLine(d.j);
-      break;
-    case 'add-todo':
-      pAddTodo();
-      break;
-    case 'add-note':
-      pAddNote();
-      break;
-    case 'add-below':
-      // ADR 0007：面板行上的加号——在该行下方插一条同类条目（缩进原样抄这一行）
-      pAddBelow(d.kind, d.j);
-      break;
-    case 'move': {
-      // 0.4.0：面板里拖动排序（只在同一栏内，跨栏不合法）。真搬行只在这里做。
-      const to = d.where === 'before' ? d.anchor : md.blockEnd(list.lines(), d.anchor);
-      if (list.move(d.from, to)) log(`panel drag move ${d.from} -> ${to}`);
-      break;
-    }
-    case 'close':
-      closePanel();
-      break;
-    case 'ack':
-      resolveCommit();
-      break;
-    case 'edit-state':
-      S.panelEditing = !!d.editing;
-      break;
-    default:
-      break;
-  }
+/* 一条已编码的面板操作按上面的处理函数落。 */
+function applyPanelOp(op) {
+  const fn = PANEL_HANDLERS[op.type];
+  if (!fn) { log(`没有 ${op.type} 的处理函数`); return; }
+  fn(op);
 }
 
 function pAddTodo() {
@@ -795,7 +796,7 @@ function pAddBelow(kind, j) {
 async function switchToFile(identity) {
   adoptFile(identity);
   S.missingShown = false;
-  closePanel();
+  await closePanelSaving();   // 面板里改了一半的先落回旧文件，再换
   await loadFile();
   invoke('save_config');
 }
@@ -808,7 +809,7 @@ async function chooseFile() {
 /* ＋ 新建待办文件（0.4.0）：原生「另存为」挑位置，新路径写一份示例内容；
    指到已存在的文件则当"打开已有文件"处理，绝不覆盖。 */
 async function newFile() {
-  await requestPanelCommit();    // 面板里改了一半的任务名先落回来，别丢
+  await flushPanel();    // 面板里改了一半的任务名先落回来，别丢
   // 再把还没落盘的改动写回去：切走之后 S.lines 马上就换成新文件的内容
   const pending = list.pending();
   list.cancelSave();
@@ -876,9 +877,9 @@ async function exitApp() {
   if (S.quitting) return;
   S.quitting = true;
   try {
-    await requestPanelCommit();
+    await flushPanel();    // 面板里未提交的编辑先落回清单，再写盘退出（未提交的编辑不丢）
     closeEditor();
-    closePanel();
+    closePanel();          // 编辑已落定，这里只是收起窗口
     list.cancelSave();
     // 没装载成功就绝不写盘（0.4.0 修）：以前无条件写，退出一次就"生"出一个空文件，
     // 下次启动看着像本来就有文件，示例内容和新建引导再也不会出现；
@@ -1018,29 +1019,25 @@ function bindChrome() {
 
 async function boot() {
   // 先挂退出监听：后面任何一步抛错（后端命令失败、文件读不了）都不该连带把「退出」弄死（ADR 0008）
-  await window.__TAURI__.event.listen('app-exit-request', () => exitApp());
+  await host().event.listen('app-exit-request', () => exitApp());
   const info = await invoke('app_info');
   adoptFile(info);   // 唯一所有者回传 {file,title}：前端不另存、不猜
   S.docked = !!info.docked;   // app_info 必带 docked，没有「读不到就猜 false」的余地
   updateDockButton();
 
   bindChrome();
-  await window.__TAURI__.event.listen('panel-req', panelReqHandler);
-  await window.__TAURI__.event.listen('dock-changed', (e) => {
+  /* 面板协议：装齐收消息的处理函数，再向面板 hello（两窗同一套）。
+     面板页比主窗口晚建，它自己也会 hello；谁先到都接得上（panelproto.js 的回喊）。 */
+  await panel.start(PANEL_HANDLERS);
+  await host().event.listen('dock-changed', (e) => {
     // 托盘菜单切模式时由 Rust 广播：按状态重算，别信本地翻转
     S.docked = !!e.payload;
     updateDockButton();
   });
-  await window.__TAURI__.event.listen('panel-close', () => {
-    // Rust 侧面板被系统关闭（Alt+F4 等）→ 主窗口同步清状态
-    S.panelOpen = false;
-    list.setPanel(-1);
-    resolveCommit();
-  });
-  await window.__TAURI__.event.listen('panel-ready', () => {
-    // 面板页监听就绪：首次打开时 panel-data 可能早于 panel.js 加载而丢失，这里补推
-    log('panel ready');
-    if (S.panelOpen) pushPanelData();
+  await host().event.listen('panel-close', async () => {
+    // Rust 侧面板被系统关闭（Alt+F4 等）：先把面板里未定稿的编辑落回清单再清状态，
+    // 不能因为窗口是被系统关掉的就把用户打的字丢了（#16 验收）。
+    await closePanelSaving();
   });
 
   await loadFile();

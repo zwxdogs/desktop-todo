@@ -1,32 +1,31 @@
 /* 桌面待办 0.4.0 详情面板逻辑（panel.html）。
    与 todo.pyw (0.2.7) 的 p_* 系列函数对应：
-   - 数据由主窗口经 panel-data 推送（Tk render_panel 的远端等价物）
-   - 操作经 panel-req 回传主窗口应用（Tk 直接改 self.lines 的远端等价物）
+   - 数据由主窗口经协议推来（Tk render_panel 的远端等价物）
+   - 操作经协议回传主窗口应用（Tk 直接改 self.lines 的远端等价物）
    - 行内编辑/标题改名在本地进行，提交时回传（Tk p_edit/p_rename 的 commit/cancel）
-   0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。 */
-'use strict';
+   0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。
+   #16 起跨窗消息全走 panelproto.js：消息名、方向、字段只在那张表里定义，
+   这里只装三个处理函数（data / flush / hide）、按名字发操作。 */
 
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
 import { createRowDrag, panelDropTarget, GRIP_SVG } from './rowdrag.js';
 import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
+import { connect, PANEL, requireHost } from './panelproto.js';
 
-/* __TAURI__ 由注入脚本在页面加载后写入，panel.js 可能先于它执行（与 app.js 早期同类竞态）。
-   因此所有 IPC 都等就绪后再发；就绪前产生的请求排队，就绪后补发。 */
-let TAURI = null;
-const pendingReq = [];
-const emitReq = (payload) => {
-  if (!TAURI) { pendingReq.push(payload); return; }
-  TAURI.event.emitTo('main', 'panel-req', payload);
+const log = (msg) => {
+  const host = typeof window !== 'undefined' ? window.__TAURI__ : null;
+  if (!host || !host.core) { console.error('panel: ' + msg); return; }
+  try { host.core.invoke('log_line', { msg: 'panel: ' + msg }); } catch (_) { /* ignore */ }
 };
-const log = (msg) => { if (TAURI) TAURI.core.invoke('log_line', { msg: 'panel: ' + msg }); };
-window.onerror = (msg, src, line) => {
-  log('js error: ' + msg + ' @' + src + ':' + line);
-};
-window.onunhandledrejection = (ev) => {
-  log('js rejection: ' + ev.reason);
-};
+/* 先挂错误钩子：下面任何一步抛错都要留痕（ADR 0008 的同类处理） */
+window.onerror = (msg, src, line) => { log('js error: ' + msg + ' @' + src + ':' + line); };
+window.onunhandledrejection = (ev) => { log('js rejection: ' + ev.reason); };
+
+/* 宿主对象由注入脚本在页面脚本之前写好：取不到就是真的没注入，当场报错，
+   不再每 20ms 轮询（#16）。两窗走同一个 connect。 */
+const proto = connect({ side: PANEL, getHost: requireHost, log });
 
 const $ = (id) => document.getElementById(id);
 const titleEl = $('panel-title');
@@ -38,12 +37,15 @@ const scrollTodos = attachScrollbar(paneTodo);
 const scrollNotes = attachScrollbar(paneNote);
 
 const P = {
-  data: null,          // 最近一次 panel-data
+  data: null,          // 最近一次 data
   edit: null,          // { j, input, handle }
   renaming: false,
 };
 
-function setEditing(on) { emitReq({ type: 'edit-state', editing: on }); }
+/* 面板对清单的一次操作：名字与字段由协议表校验，发错当场抛。 */
+function req(name, args = {}) { proto.send(name, args); }
+
+function setEditing(on) { req('editing', { on }); }
 
 /* ---------- 行构建（Tk p_build_row 1263-1303：全部顶格 pad=12） ---------- */
 
@@ -58,9 +60,9 @@ function boxSvg(checked) {
     '<rect x="2" y="2" width="14" height="14" fill="none" stroke="#C6CCD4" stroke-width="1"/></svg>';
 }
 
-/* 离开编辑态前先把未定稿的文字交回去（删除/插行/关面板都走这里）。
-   顺序要紧：先 teardown 再 commitEdit——主窗口回推新一轮数据时若还挂着 P.edit，
-   onPanelData 会再提交一次并 return，把那一轮渲染吞掉（新行就进不了编辑）。 */
+/* 离开编辑态前先把未定稿的文字交回去（删除/插行都走这里）。
+   顺序要紧：先 teardown 再提交——主窗口回推新一轮数据时若还挂着 P.edit，
+   onData 会再提交一次并 return，把那一轮渲染吞掉（新行就进不了编辑）。 */
 function commitPending() {
   if (!P.edit) return;
   const { j, input } = P.edit;
@@ -76,7 +78,7 @@ function pMenu(j, x, y) {
     { label: '删除', fn: () => {
         // Tk delete_line 前会 _commit_edits：先提交未定稿编辑再删
         commitPending();
-        emitReq({ type: 'delete', j });
+        req('remove', { j });
       } },
   ], x, y);
 }
@@ -96,7 +98,7 @@ function buildRow(container, item, isTodo) {
     box.className = 'box';
     box.innerHTML = boxSvg(item.checked);
     box.style.marginLeft = '12px';
-    box.addEventListener('click', () => emitReq({ type: 'toggle', j: item.j }));
+    box.addEventListener('click', () => req('toggle', { j: item.j }));
     row.appendChild(box);
   }
 
@@ -138,7 +140,7 @@ function makePaneDrag(pane) {
     },
     resolve: (rows, y) => panelDropTarget(rows, pane.getBoundingClientRect(), y),
     lineRight: () => window.innerWidth - 8,
-    onDrop: (from, target) => emitReq({ type: 'move', from, anchor: target.rowKey, where: target.where }),
+    onDrop: (from, target) => req('move', { from, anchor: target.rowKey, where: target.where }),
   });
 }
 
@@ -165,13 +167,13 @@ function addHandle(row, j, pane) {
 }
 
 /* 行内加号（ADR 0007）：点它在这行下面插一条同类条目（子待办插兄弟，备注插备注）。
-   先收掉未定稿的编辑，否则主窗口回推的新数据会被 onPanelData 的提交逻辑吞掉。 */
+   先收掉未定稿的编辑，否则主窗口回推的新数据会被 onData 的提交逻辑吞掉。 */
 function addPlus(row, j, kind) {
   const p = plusButton(kind === 'todo' ? '在下方添加子待办' : '在下方添加备注');
   p.addEventListener('click', (e) => {
     e.stopPropagation();
     commitPending();
-    emitReq({ type: 'add-below', kind, j });
+    req('addBelow', { kind, j });
   });
   p.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -235,8 +237,8 @@ function pEditAt(lbl, j) {
       if (!P.edit || P.edit.handle !== handle) return;
       const jj = P.edit.j;
       teardownEdit();
-      emitReq({ type: 'edit-cancel', j: jj });
-      emitReq({ type: 'edit-state', editing: false });
+      req('discardEdit', { j: jj });
+      req('editing', { on: false });
     },
   });
   P.edit = { j: idx, input: handle.input, handle };
@@ -271,9 +273,9 @@ function teardownEdit() {
 }
 
 function commitEdit(j, value) {
-  // Tk p_edit commit(1323-1333)：主窗口应用后 render_list → 面板收到新数据
+  // Tk p_edit commit(1323-1333)：主窗口应用后重推内容
   setEditing(false);
-  emitReq({ type: 'edit-commit', j, value });
+  req('setText', { j, value });
 }
 
 /* ---------- 标题改名（Tk p_rename 1362-1420） ---------- */
@@ -303,19 +305,19 @@ titleEdit.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const v = titleEdit.value;
     teardownRename();
-    emitReq({ type: 'rename', value: v });
+    req('rename', { value: v });
   } else if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
     teardownRename();
-    emitReq({ type: 'rename-cancel' });
+    req('discardRename', {});
   }
 });
 titleEdit.addEventListener('blur', () => {
   if (P.renaming) {
     const v = titleEdit.value;
     teardownRename();
-    emitReq({ type: 'rename', value: v });
+    req('rename', { value: v });
   }
 });
 titleEdit.addEventListener('compositionend', () => titleEdit.focus());
@@ -330,12 +332,16 @@ document.addEventListener('mousedown', (e) => {
 }, true);
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-/* ---------- 顶栏 ---------- */
-
-$('panel-x').addEventListener('click', () => emitReq({ type: 'close' }));
+/* 收起面板：先把未定稿的编辑交出去（Tk close_panel 开头就是 _commit_edits），
+   再请主窗口关。编辑在收起之前已经落进清单，所以关面板不丢字。 */
+function requestClose() {
+  commitPending();
+  req('close', {});
+}
+$('panel-x').addEventListener('click', requestClose);
 $('panel-x').addEventListener('mousedown', (e) => e.preventDefault());
-$('add-todo').addEventListener('click', () => { commitPending(); emitReq({ type: 'add-todo' }); });
-$('add-note').addEventListener('click', () => { commitPending(); emitReq({ type: 'add-note' }); });
+$('add-todo').addEventListener('click', () => { commitPending(); req('addTodo', {}); });
+$('add-note').addEventListener('click', () => { commitPending(); req('addNote', {}); });
 for (const id of ['panel-x', 'add-todo', 'add-note']) {
   $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
 }
@@ -347,7 +353,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (anyDragOn()) { e.preventDefault(); cleanupDrags(); return; }
   if (P.edit || P.renaming) return;   // 编辑框自己的 handler 处理并 stopPropagation
-  emitReq({ type: 'close' });
+  requestClose();
 });
 
 /* 拖动中右键 = 取消（捕获阶段，顺手吞掉这一下的行菜单） */
@@ -358,66 +364,57 @@ document.addEventListener('contextmenu', (e) => {
   cleanupDrags();
 }, true);
 
-/* ---------- 事件 ---------- */
+/* ---------- 协议处理函数（表里的每一条收消息都在这儿有唯一实现） ---------- */
 
-function onPanelData(ev) {
-  const d = ev.payload;
-  if (!d) return;
-  log('panel-data received: title=' + d.title + ' todos=' + d.todos.length + ' notes=' + d.notes.length);
+/* 把未定稿的编辑收成操作、并就地清掉本地编辑态。落定回执与本地提交共用这一份，
+   所以「回执里有什么」= 「面板本来要交什么」，不会有两套说法。 */
+function pendingOps() {
+  if (P.edit) {
+    const { j, input } = P.edit;
+    const value = input.value;
+    teardownEdit();
+    setEditing(false);
+    return [proto.op('setText', { j, value })];
+  }
+  if (P.renaming) {
+    const value = titleEdit.value;
+    teardownRename();   // 已含 setEditing(false)
+    return [proto.op('rename', { value })];
+  }
+  return [];
+}
+
+function onData(d) {
+  log('data received: title=' + d.title + ' todos=' + d.todos.length + ' notes=' + d.notes.length);
   // Tk render_panel(1234-1235)：先 _p_close_editor（提交），再 _p_restore_title（丢弃改名）
   if (P.renaming) teardownRename();
   if (P.edit) {
     const { j, input } = P.edit;
     teardownEdit();
-    setEditing(false);
-    commitEdit(j, input.value);   // 主窗口应用后会再推一轮新数据
-    return;                        // 等下一轮 panel-data 再渲染
+    commitEdit(j, input.value);   // 自带 setEditing(false)；主窗口应用后会再推一轮数据
+    return;                        // 等下一轮 data 再渲染
   }
   P.data = d;
   render(d);
 }
 
-function onPanelCommit() {
-  // 主窗口请求落定编辑（删除/刷新/退出前）
-  if (P.edit) {
-    const { j, input } = P.edit;
-    teardownEdit();
-    setEditing(false);
-    commitEdit(j, input.value);
-  } else if (P.renaming) {
-    const v = titleEdit.value;
-    teardownRename();
-    emitReq({ type: 'rename', value: v });
-  } else {
-    emitReq({ type: 'ack' });
-  }
+/* 主窗口请求落定：把未定稿的编辑交回去，再回显式回执。
+   回执本身就是「面板本来要提交什么」的完整答案，主窗口照着落，
+   不再靠一个 400ms 墙钟猜「大概提交完了吧」。 */
+function onFlush(m) {
+  const ops = pendingOps();
+  proto.send('receipt', { id: m.id, ops });
 }
 
-function onPanelHide() {
-  // 面板被收起：清本地编辑态（Tk close_panel 清空状态）
+/* 面板被收起：清本地编辑态（Tk close_panel 清空状态）。
+   未定稿的编辑在收起之前已经由 flush 交回去了，这里只丢本地壳。 */
+function onHide() {
   if (P.edit) teardownEdit();
   if (P.renaming) teardownRename();
   setEditing(false);
 }
 
-function waitTauri() {
-  return new Promise((resolve) => {
-    const tick = () => {
-      const t = window.__TAURI__;
-      if (t && t.core && t.event) resolve(t);
-      else setTimeout(tick, 20);
-    };
-    tick();
-  });
-}
-
 (async () => {
-  TAURI = await waitTauri();
-  for (const p of pendingReq.splice(0)) TAURI.event.emitTo('main', 'panel-req', p);
-  await TAURI.event.listen('panel-data', onPanelData);
-  await TAURI.event.listen('panel-commit', onPanelCommit);
-  await TAURI.event.listen('panel-hide', onPanelHide);
-  // 通知主窗口监听已就绪：首次打开时主窗口的 panel-data 可能早于本页加载而丢失
-  await TAURI.event.emitTo('main', 'panel-ready', {});
+  await proto.start({ data: onData, flush: onFlush, hide: onHide });
   log('ready');
-})().catch((e) => log('init failed: ' + e));
+})().catch((e) => log('init failed: ' + (e && e.message ? e.message : e)));
