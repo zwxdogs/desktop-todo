@@ -31,10 +31,10 @@ dist\DesktopTodo\DesktopTodo.exe <md文件路径> [float|x,y]
 ## 测试
 
 ```
-node --test app/ui/*.test.js
+node --test app/ui/*.test.js tools/*.test.mjs
 ```
 
-纯函数（Markdown 解析/序列化、子树、删除、批量删除已完成、缩进、拖动排序、滚动条几何）与清单模块、撤销栈共 144 项。
+纯函数（Markdown 解析/序列化、子树、删除、批量删除已完成、缩进、拖动排序、滚动条几何）、清单模块、撤销栈、文件身份、发布版本账目共 159 项。
 
 ## 构建
 
@@ -46,14 +46,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
 
 ## 本机部署（维护者）
 
+发布一条命令（干净工作区、在 `dev` 上）：
+
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File app\build.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File app\release.ps1
 ```
 
-1. 结束正在运行的 `DesktopTodo.exe`
-2. 用 `dist\DesktopTodo\DesktopTodo.exe` 覆盖 `E:\桌面待办\DesktopTodo\DesktopTodo.exe`
-3. 保留该目录的 `config.json`；若还残留 PyInstaller 的 `_internal\`，整目录删掉
-4. 重新启动，确认贴桌面、任务栏按钮、窗口位置与读写正常
+它会自增补丁版本（版本号以 `app\src-tauri\tauri.conf.json` 为准，同步进 `Cargo.toml` 与 `Cargo.lock`）、提交版本号、构建、部署到 `E:\桌面待办\DesktopTodo`（保留 `config.json`、清掉遗留的 `_internal\`）、重启、把 `dev` 合并进 `main` 并打 `v<版本>` 标签。`-DryRun` 只演练不改动，`-Push` 推送 `main` 与标签，`-Bump minor|major` 或 `-Version x.y.z` 指定版本。
 
 ## 下载分发版（免安装）
 
