@@ -31,7 +31,7 @@ supersedes: 0001
 
 ## Consequences
 
-- `todo.pyw` 与 `build.ps1` 保留在仓库中作为参照与回退路径，不再构建部署；部署目标 `E:\桌面待办\DesktopTodo` 改放 Tauri 单文件 exe（config.json 保留，格式不变：物理像素坐标 + docked）。
+- `todo.pyw` 与 `build.ps1` 保留在仓库中作为参照与回退路径，不再构建部署；部署目标 `E:\桌面待办\DesktopTodo` 改放 Tauri 单文件 exe（config.json 保留，字段与语义不变：物理像素坐标 + docked；2026-11-14 [#13](https://github.com/zwxdogs/desktop-todo/issues/13) 起写出的字节格式改为 serde pretty，见 `app/PARITY.md` §3-18）。
 - 领域逻辑继续以纯函数形式存在于 `app/ui/md.js`（单一事实源不变：Markdown 文件）；Rust 只做壳（窗口管理、文件 IO、config 持久化、单实例、Win32 维护轮询）。
 - 详情面板是独立窗口，但与主窗口分属两个 webview，状态同步走事件（行为与 Tk 单进程 Toplevel 对齐）。
 - 单实例互斥体名不变（`Zwx_DesktopTodoWidget_Mutex`），与旧版互斥。

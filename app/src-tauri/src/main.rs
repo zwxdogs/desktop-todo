@@ -4,7 +4,7 @@
 // 与 todo.pyw 0.2.7 的行为对齐见 app/PARITY.md；有意差异 = 主窗口两态（固定桌面 / 普通窗口，ADR 0004）。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -328,28 +328,8 @@ fn panel_pos(rx: i32, ry: i32, rw: i32, pw: i32, ph: i32, gap: i32) -> (i32, i32
 }
 
 // ---------------- config.json ----------------
-// 与 todo.pyw json.dump(cfg, ensure_ascii=False, indent=1) 字节对齐：
-// 1 空格缩进、无尾随换行、Python 风格字符串转义。
-fn py_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn write_config(app: &AppHandle) {
-    let (file, docked) = {
+    let (file, docked, app_dir) = {
         let st = app.state::<Mutex<Shared>>();
         let s = st.lock().unwrap();
         // 测试模式从不读 config.json（见 setup 里 testing 分支），写它只有一个后果：
@@ -358,50 +338,105 @@ fn write_config(app: &AppHandle) {
             s.log("test mode: config.json not written");
             return;
         }
-        (s.file.to_string_lossy().into_owned(), s.docked)
+        (s.file.to_string_lossy().into_owned(), s.docked, s.exe_dir.clone())
     };
     let Some(win) = app.get_webview_window("main") else { return };
     // Tk geometry 语义 = client 区域；无框可缩放窗口的 outer 含隐形 WS_THICKFRAME 边
     // （本机实测 outer 比 client 大 26×15 物理像素），用 outer 记忆会每轮启动膨胀。
     let Ok(pos) = win.inner_position() else { return };
     let Ok(size) = win.inner_size() else { return };
-    let cfg = format!(
-        "{{\n \"file\": {},\n \"x\": {},\n \"y\": {},\n \"w\": {},\n \"h\": {},\n \"docked\": {}\n}}",
-        py_json_string(&file),
-        pos.x, pos.y, size.width, size.height, if docked { "true" } else { "false" }
-    );
-    let path = {
-        let st = app.state::<Mutex<Shared>>();
-        let s = st.lock().unwrap();
-        s.exe_dir.join("config.json")
+    let cfg = Config {
+        file,
+        x: Some(pos.x as i64),
+        y: Some(pos.y as i64),
+        w: Some(size.width as i64),
+        h: Some(size.height as i64),
+        docked,
     };
-    if let Err(e) = std::fs::write(&path, cfg.as_bytes()) {
-        app.state::<Mutex<Shared>>().lock().unwrap().warn_readonly(&e.to_string());
+    if let Err(e) = cfg.save(&app_dir) {
+        app.state::<Mutex<Shared>>().lock().unwrap().warn_readonly(&e);
     }
 }
 
-#[derive(Default, serde::Deserialize)]
-struct ConfigRaw {
-    file: Option<String>,
-    #[serde(default)]
-    x: Option<i64>,
-    #[serde(default)]
-    y: Option<i64>,
-    #[serde(default)]
-    w: Option<i64>,
-    #[serde(default)]
-    h: Option<i64>,
-    #[serde(default)]
-    docked: Option<bool>,
+/// 旧 config 里可能写成 `"file": null`（早期版本 / 手改）：按空串读，不整份判坏。
+fn string_or_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
 
-fn load_config(app_dir: &Path) -> ConfigRaw {
-    let Ok(text) = std::fs::read_to_string(app_dir.join("config.json")) else {
-        return ConfigRaw::default();
-    };
-    // 外部工具（PS5.1 Set-Content -Encoding UTF8 等）可能写出 BOM，serde_json 不认，剥掉
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    serde_json::from_str(text).unwrap_or_default()
+/// 同上：`"docked": null` 按 false（普通窗口）读。
+fn bool_or_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
+
+/// config.json 的唯一定义：字段、默认值、读写在这里，路径解析也跟着它走。
+///
+/// 手拼 JSON 的双轨制已删（#13）：它当年只为与已删除的 Tk `json.dump(indent=1)`
+/// 字节对齐，唯一的读者随 ADR 0006 一起消失，写出去的字节从没被读回过。
+/// 现在写用 serde、读也用 serde，往返由 `config_tests` 钉住。
+/// 缺字段落默认值：`file` 空串（启动时解析成 exe 旁的 `待办.md`）、几何 `null`、
+/// `docked` false（普通窗口，ADR 0004 的默认）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct Config {
+    /// 当前文件的路径，原样记录（可能是 Tk 时代留下的正斜杠写法）。
+    #[serde(deserialize_with = "string_or_empty")]
+    file: String,
+    x: Option<i64>,
+    y: Option<i64>,
+    w: Option<i64>,
+    h: Option<i64>,
+    /// 固定在桌面（true）/ 普通窗口（false）。
+    #[serde(deserialize_with = "bool_or_false")]
+    docked: bool,
+}
+
+impl Config {
+    /// config 的位置：exe 同目录（绿色便携语义，与 udf/ 同址）。
+    fn path(app_dir: &Path) -> PathBuf {
+        app_dir.join("config.json")
+    }
+
+    /// 解析一份 config 文本：外部工具（PS5.1 `Set-Content -Encoding UTF8` 等）可能写出
+    /// BOM，serde_json 不认，剥掉；坏 JSON 退回默认值（启动不能因为手改坏的配置起不来）。
+    fn from_text(text: &str) -> Config {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        serde_json::from_str(text).unwrap_or_default()
+    }
+
+    /// 读 config；文件不存在、读不动、内容是坏的都算「全新安装」。
+    fn load(app_dir: &Path) -> Config {
+        let Ok(text) = std::fs::read_to_string(Self::path(app_dir)) else {
+            return Config::default();
+        };
+        Self::from_text(&text)
+    }
+
+    /// 唯一的写入口：serde 序列化后整份覆盖；先写同目录临时文件再 rename，
+    /// 写到一半崩掉也不会留下半份 config（位置与固定状态因此不会在重启时悄悄丢）。
+    /// 旧 Tk 的 `json.dump(indent=1)` 字节格式没人读了（ADR 0006），不必再对齐。
+    fn save(&self, app_dir: &Path) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let path = Self::path(app_dir);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text.as_bytes()).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
+    }
+
+    /// config 里记的文件 → 实际路径：绝对路径原样，相对路径按 exe 目录解析，
+    /// 空串 = 还没有文件，落到引导用的 `待办.md`。
+    fn resolve_file(&self, app_dir: &Path) -> PathBuf {
+        let p = PathBuf::from(&self.file);
+        if p.as_os_str().is_empty() {
+            app_dir.join("待办.md")
+        } else if p.is_absolute() {
+            p
+        } else {
+            app_dir.join(p)
+        }
+    }
 }
 
 // ---------------- 数据对象 ----------------
@@ -1051,22 +1086,14 @@ fn main() {
         }
     }
 
-    let cfg = if testing { ConfigRaw::default() } else { load_config(&app_dir) };
-    let file: PathBuf = match (args.first(), cfg.file.clone()) {
-        (Some(md), _) => PathBuf::from(md),
-        (None, Some(f)) if !f.is_empty() => {
-            let p = PathBuf::from(&f);
-            if p.is_absolute() {
-                p
-            } else {
-                app_dir.join(p)
-            }
-        }
-        _ => app_dir.join("待办.md"),
+    let cfg = if testing { Config::default() } else { Config::load(&app_dir) };
+    let file: PathBuf = match args.first() {
+        Some(md) => PathBuf::from(md),
+        None => cfg.resolve_file(&app_dir),
     };
     // 默认普通窗口（ADR 0004）：「普通窗口 → 固定在桌面」是用户唯一主动动作；
     // 老 config 里写着 docked=true 的继续固定在桌面，不迁移。
-    let initial_dock = if testing { want_dock } else { cfg.docked.unwrap_or(false) };
+    let initial_dock = if testing { want_dock } else { cfg.docked };
 
     // 日志常开（ADR 0008）：白屏那次一点痕迹都没留下，事后只能靠猜。
     // 测试运行写 md 旁边（与原行为一致），正式运行写 exe 旁 widget.log。
@@ -1487,6 +1514,102 @@ mod file_identity_tests {
         assert_eq!(neu["file"], "新的.md");
         assert_eq!(neu["title"], "新的");
         assert_eq!(neu["created"], false);
+    }
+}
+
+// #13：config.json 由一个类型拥有读写。先钉「写出去的字节能原样读回」——手拼 JSON 时代
+// 写出去的字节没有任何测试读回，双轨制就一直没被抓住。
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn sample() -> Config {
+        Config {
+            file: "E:/项目/待办.md".into(),
+            x: Some(3062),
+            y: Some(750),
+            w: Some(760),
+            h: Some(1280),
+            docked: true,
+        }
+    }
+
+    #[test]
+    fn round_trip_keeps_every_field() {
+        let text = serde_json::to_string_pretty(&sample()).unwrap();
+        assert_eq!(Config::from_text(&text), sample(), "全部字段写出再读回必须是同一个值");
+    }
+
+    #[test]
+    fn old_file_without_optional_fields_reads_with_defaults() {
+        // 手改过的 / 老版本写的 config 可能只有一部分字段：缺的落默认值，不能整份丢掉
+        let cfg = Config::from_text("{\"file\": \"E:/旧/待办.md\"}");
+        assert_eq!(cfg.file, "E:/旧/待办.md");
+        assert_eq!((cfg.x, cfg.y, cfg.w, cfg.h), (None, None, None, None));
+        assert!(!cfg.docked, "缺 docked = 普通窗口（ADR 0004 的默认）");
+    }
+
+    /// 测试用的临时目录：放在 target/ 下（cargo 一定可写，%TEMP% 在受限账户下可能被拒）。
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("config-test-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn save_then_load_keeps_position_and_desktop_mode() {
+        // 验收「文件位置与停在桌面 / 普通窗口两态重启后保持」：写盘 → 重新读，就是一次重启的模型
+        let dir = scratch_dir("roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        sample().save(&dir).unwrap();
+        assert_eq!(Config::load(&dir), sample(), "重启后位置与固定/普通状态必须还是原样");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn null_file_and_dock_read_as_defaults() {
+        // 早期的 Option 字段能读 null：换成 String/bool 后，单个 null 不该把整份配置判坏
+        let cfg = Config::from_text("{\"file\": null, \"x\": 1, \"docked\": null}");
+        assert_eq!(cfg.file, "");
+        assert_eq!(cfg.x, Some(1), "别的字段照常读出来");
+        assert!(!cfg.docked);
+    }
+
+    #[test]
+    fn missing_file_means_defaults() {
+        // 全新安装：exe 旁没有 config.json 时用默认值，不能因为读不到就 panic
+        let dir = scratch_dir("missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(Config::load(&dir), Config::default());
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        // 未来字段或用户手加的注记不该让整份配置判坏
+        let cfg = Config::from_text(
+            "{\"file\": \"a.md\", \"x\": 1, \"y\": 2, \"w\": 3, \"h\": 4, \"docked\": false, \"future\": {\"k\": true}}",
+        );
+        assert_eq!(cfg.file, "a.md");
+        assert_eq!((cfg.x, cfg.y, cfg.w, cfg.h), (Some(1), Some(2), Some(3), Some(4)));
+    }
+
+    #[test]
+    fn resolve_file_handles_absolute_relative_and_empty() {
+        // 路径解析只在这里定义一次：启动与测试都走它
+        let app_dir = Path::new("E:/部署");
+        let mut cfg = Config::default();
+        assert_eq!(cfg.resolve_file(app_dir), app_dir.join("待办.md"), "空路径 = 全新安装的引导文件");
+        cfg.file = "子目录/清单.md".into();
+        assert_eq!(cfg.resolve_file(app_dir), app_dir.join("子目录/清单.md"), "相对路径按 exe 目录解析");
+        cfg.file = "E:/项目/待办.md".into();
+        assert_eq!(cfg.resolve_file(app_dir), PathBuf::from("E:/项目/待办.md"), "绝对路径原样");
+    }
+
+    #[test]
+    fn bom_or_broken_json_falls_back_to_defaults() {
+        // PS5.1 写出的 BOM 不剥掉的话 serde 会整份判坏 → 启动悄悄丢掉位置与停靠状态
+        assert_eq!(Config::from_text("\u{feff}{\"file\":\"a.md\",\"x\":1}").file, "a.md");
+        assert_eq!(Config::from_text("{ 手改坏了"), Config::default());
     }
 }
 
