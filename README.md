@@ -34,7 +34,7 @@ dist\DesktopTodo\DesktopTodo.exe <md文件路径> [float|x,y]
 node --test app/ui/*.test.js
 ```
 
-纯函数（Markdown 解析/序列化、子树、删除、批量删除已完成、缩进、拖动排序、滚动条几何）与撤销栈共 118 项。
+纯函数（Markdown 解析/序列化、子树、删除、批量删除已完成、缩进、拖动排序、滚动条几何）与清单模块、撤销栈共 144 项。
 
 ## 构建
 

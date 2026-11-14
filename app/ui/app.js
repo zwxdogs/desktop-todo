@@ -7,7 +7,7 @@
 'use strict';
 
 import * as md from './md.js';
-import { createUndoStack } from './undo.js';
+import { createList } from './list.js';
 import { starterText, missingHint } from './starter.js';
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
@@ -36,24 +36,35 @@ const menuEl = $('menu');
 let mainScroll = null;   // 自绘滚动条（0.4.1；bindChrome 里挂到 listEl 上）
 
 const S = {
-  lines: [],
+  lines: [],       // 清单模块那份数组的镜像：每次重绘前由 render 钩子同步
   file: '',
-  nl: '\n',
-  hasBom: false,   // Tk has_bom 存实例：最近一次读到的 BOM 状态，写回沿用
   lastSeen: null,
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
-  loaded: false,   // 内存里的 S.lines 是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
+  loaded: false,   // 内存里的清单是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
   edit: null,            // { index, input }
   panelOpen: false,
   panelTodo: -1,
-  panelAnchor: null,     // [text, indentUnits]
   panelEditing: false,   // 面板窗口里有未提交编辑（Tk p_edit_entry 非空）
-  saveTimer: null,
   commitWaiter: null,    // requestPanelCommit 的应答槽
-  undoStack: createUndoStack(50),
   quitting: false,
 };
+
+/* 清单模块（list.js）：清单的唯一变更入口。八个意图在那边各有唯一实现，撤销栈、
+   写盘合并窗口、面板锚点、行保真都在模块内部；这里只提供窗口自己的四件事：
+   变更前收掉编辑框/面板、重绘、写盘、回执。换行符与 BOM 也由模块持有。 */
+const list = createList({
+  hooks: {
+    before: listBefore,
+    render: (lines) => { S.lines = lines; renderList(); },
+    write: (text) => writeText(text),
+    afterSave: (ok, n, err) => {
+      if (ok) log(`saved ${n} lines`);
+      else log(`save failed: ${err}`);
+    },
+    onSnapshot: hideToast,
+  },
+});
 
 /* 界面心跳（ADR 0008）：Rust 侧看门狗靠它判断界面还活着，白屏就自动 reload 自救。
    定时器在模块顶层就开——boot 卡住也还在发，只有页面/进程真死才会断。 */
@@ -108,7 +119,7 @@ async function fileStateExists() {
    写成功后 JS 自记 lastSeen（Tk self.last_seen = stat_now()），否则 poll 误报外部变化并清撤销栈 */
 async function writeText(content) {
   try {
-    const ok = await invoke('write_md', { file: S.file, content, hasBom: S.hasBom });
+    const ok = await invoke('write_md', { file: S.file, content, hasBom: list.hasBom() });
     if (ok) S.lastSeen = await statNow();
     return ok;
   } catch (e) {
@@ -122,45 +133,28 @@ function basename(p) {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
-/* ---------- 撤销（todo.pyw:1000-1023） ---------- */
-
-function pushUndo() {
-  S.undoStack.push(md.serialize(S.lines));
-  hideToast();   // 回执只认「刚删完」那一刻：别的动作一旦压栈，它就可能撤错东西，直接收掉
-}
-
-async function undo() {
-  hideToast();
-  if (S.edit || S.panelEditing || !S.undoStack.canUndo()) return;
-  const snap = S.undoStack.undo();
-  const ok = await writeText(snap);
-  if (!ok) { log('undo save failed'); return; }
-  S.lines = md.parseText(snap);
-  renderList();
-  log(`undo (left ${S.undoStack.size()} snapshots)`);
-}
-
-/* ---------- 保存调度（todo.pyw:1026-1038） ---------- */
-
-function scheduleSave() {
-  if (S.saveTimer) clearTimeout(S.saveTimer);
-  S.saveTimer = setTimeout(doSave, 250);
-}
-
-function cancelSave() {
-  if (S.saveTimer) { clearTimeout(S.saveTimer); S.saveTimer = null; }
-}
-
-async function doSave() {
-  S.saveTimer = null;
-  try {
-    if (await writeText(md.serialize(S.lines))) {
-      log(`saved ${S.lines.length} lines`);
-    }
-  } catch (e) {
-    log(`save failed: ${e}`);
-    setTitle('保存失败!');
+/* ---------- 变更前收尾 + 撤销（todo.pyw:1000-1023） ----------
+   「变更前要不要收掉编辑框、关掉面板」只在这里决定一次。清单模块每次真变更之前
+   都会带着变更描述回调过来，十二处入口不再各自判断。 */
+function listBefore(change) {
+  const pi = list.panelIndex();   // 面板盯着的那一行；模块是锚的唯一所有者
+  if (change.kind === 'remove') {
+    // 正在编辑的那行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964）
+    if (S.edit && S.edit.index >= change.index && S.edit.index < change.end) discardEditor();
+    if (S.panelOpen && pi >= change.index && pi < change.end) closePanel();
+  } else if (change.kind === 'deleteCompleted') {
+    const covers = (k) => change.blocks.some((b) => b.i <= k && k < b.end);
+    // 被删的那行不提交（丢字是用户要的），没被删的先落定，别把打的字丢了
+    if (S.edit) { if (covers(S.edit.index)) discardEditor(); else closeEditor(); }
+    if (S.panelOpen && pi >= 0 && covers(pi)) closePanel();
   }
+}
+
+async function undoNow() {
+  hideToast();   // 回执只认「刚删完」那一刻：换了撤销目标就先收掉
+  if (S.edit || S.panelEditing) return;
+  if (await list.undo()) log(`undo (left ${list.undoSize()} snapshots)`);
+  else log('undo save failed');
 }
 
 /* ---------- 文件装载（todo.pyw:565-602） ---------- */
@@ -187,7 +181,7 @@ function showMissing() {
 
 async function loadFile() {
   // 外部改动重载：丢弃尚未落盘的旧内存状态（Tk load_file 同样直接重读，不回写）
-  cancelSave();
+  list.cancelSave();
   if (!(await fileStateExists())) {
     showMissing();
     log(`file missing: ${S.file}`);
@@ -206,17 +200,14 @@ async function loadFile() {
     }
     return;
   }
-  S.nl = data.nl;
-  S.hasBom = data.has_bom;   // Tk has_bom 存实例，写回沿用
-  S.lines = md.parseText(data.text);
-  S.lastSeen = await statNow();
   S.loaded = true;
-  S.undoStack = createUndoStack(50);   // 文件被外部/重新加载, 撤销历史失效
   let base = basename(S.file);
   if (base.toLowerCase().endsWith('.md')) base = base.slice(0, -3);
   setTitle(base);
-  renderList();
-  log(`loaded ${S.lines.length} lines from ${S.file}`);
+  // 整份替换：换行符、BOM、撤销栈都交给清单模块，替换本身不写盘（外部改动重载，Tk 同款）
+  list.replaceAll({ lines: md.parseText(data.text), nl: data.nl, hasBom: data.has_bom });
+  S.lastSeen = await statNow();
+  log(`loaded ${list.lines().length} lines from ${S.file}`);
 }
 
 /* ---------- 渲染清单（todo.pyw:605-707） ---------- */
@@ -392,11 +383,7 @@ function bindBlankContext(el) {
 /* ---------- 编辑（todo.pyw:827-895） ---------- */
 
 function toggleLine(i) {
-  const ln = S.lines[i];
-  pushUndo();
-  md.toggleRaw(ln);
-  renderList();
-  scheduleSave();
+  list.toggle(i);
 }
 
 function editRow(i) {
@@ -441,12 +428,8 @@ function commitEdit() {
   const entry = S.edit;
   const { index, input } = entry;
   dropEditor(entry);
-  if (!(index >= 0 && index < S.lines.length)) { renderList(); return; }
-  pushUndo();
-  md.setLineText(S.lines[index], input.value);
-  panelSyncAnchor(index);
-  renderList();
-  scheduleSave();
+  if (!(index >= 0 && index < list.lines().length)) { renderList(); return; }
+  list.setText(index, input.value);   // 行已不在（外部重载过）由模块挡掉
 }
 
 function cancelEdit() {
@@ -461,12 +444,9 @@ function closeEditor() {
   const entry = S.edit;
   const { index, input } = entry;
   dropEditor(entry);
-  if (index >= 0 && index < S.lines.length) {
+  if (index >= 0 && index < list.lines().length) {
     try {
-      pushUndo();
-      md.setLineText(S.lines[index], input.value);
-      panelSyncAnchor(index);
-      scheduleSave();
+      list.setText(index, input.value, { quiet: true });
     } catch (e) { /*Tk 同款吞异常*/ }
   }
 }
@@ -475,14 +455,6 @@ function closeEditor() {
 function discardEditor() {
   if (!S.edit) return;
   dropEditor(S.edit);
-}
-
-function panelSyncAnchor(i) {
-  // todo.pyw:892-896：就地改了面板对应待办的文字 → 同步锚，别让面板自毁
-  if (S.panelOpen && i === S.panelTodo && i >= 0 && i < S.lines.length) {
-    const ln = S.lines[i];
-    S.panelAnchor = [ln.text, md.indentUnits(ln.indent)];
-  }
 }
 
 /* 点击编辑框以外的地方即结束编辑（todo.pyw:912-925）
@@ -504,16 +476,8 @@ document.addEventListener('mousedown', (e) => {
 /* ---------- 插入/删除/分组（todo.pyw:927-997） ---------- */
 
 function insertLine(i, kind, indent, text, opts = {}) {
-  pushUndo();
-  const ref = opts.pos === undefined ? i : opts.pos;
-  if (ref >= 0 && ref < S.lines.length && !S.lines[ref].raw.endsWith('\n')) {
-    S.lines[ref].raw += S.nl;
-  }
-  const raw = indent + (kind === 'todo' ? '- [ ] ' : '- ') + text + S.nl;
-  const at = (opts.pos === undefined ? i : opts.pos) + 1;
-  S.lines.splice(at, 0, md.parseLine(raw));
-  renderList();
-  scheduleSave();
+  const at = list.insert(i + 1, kind, indent, text);
+  if (at < 0) return;
   if (opts.inPanel) {
     setTimeout(() => pushPanelData(at), 30);   // Tk after(30, p_edit(at))
   } else {
@@ -521,21 +485,8 @@ function insertLine(i, kind, indent, text, opts = {}) {
   }
 }
 
-async function deleteLine(i) {
-  if (!(i >= 0 && i < S.lines.length)) return;
-  pushUndo();
-  const ln = S.lines[i];
-  if (ln.kind === 'todo') {
-    const end = md.subtreeEnd(S.lines, i);
-    if (S.edit && i <= S.edit.index && S.edit.index < end) discardEditor();
-    if (S.panelOpen && i <= S.panelTodo && S.panelTodo < end) closePanel();
-    S.lines = md.deleteSubtree(S.lines, i);
-  } else {
-    if (S.edit && S.edit.index === i) discardEditor();
-    S.lines.splice(i, 1);
-  }
-  renderList();
-  scheduleSave();
+function deleteLine(i) {
+  list.remove(i);   // 子块整块删、编辑框/面板收尾都在模块里
 }
 
 /* 清单可写：文件读进来过、且没停在「文件不见了」的缺失态 */
@@ -545,28 +496,17 @@ function listReady() {
 
 /* 批量删除已完成（用户拍板）：只看顶层待办自己的勾选，勾了就整块删。
    不弹确认框；删完在窗口底部给一条 3 秒的回执，点它就撤销整批（Q4 A）。
-   整批只压一个快照：浮在半空的编辑先落定（它们自己会压快照），
-   之后才是这一批的那一个 —— 回执点一下、或 Ctrl+Z 一次就退回去。 */
+   整批只压一个快照：浮在半空的编辑先落定，之后才是这一批那一个 —— 回执点一下、
+   或 Ctrl+Z 一次就退回去。编辑框与面板的收尾由 listBefore 统一处理。 */
 async function deleteCompletedTodos() {
   if (!listReady()) return;
   await requestPanelCommit();   // 详情面板里改了一半的先落回来
-  const blocks = md.completedScan(S.lines);
-  if (!blocks.length) return;
-  const covers = (k) => blocks.some((b) => b.i <= k && k < b.end);
-  // 正在编辑的那行若要被删：不提交，直接丢弃（与单条删除同款）；没被删就先提交，别把打的字丢了
-  if (S.edit) { if (covers(S.edit.index)) discardEditor(); else closeEditor(); }
-  pushUndo();
-  // 面板盯着的待办若落在被删块里，跟着关掉
-  if (S.panelOpen && covers(S.panelTodo)) closePanel();
-  const n = blocks.length;
-  const withUnfinished = blocks.filter((b) => b.unfinished > 0).length;
-  S.lines = md.deleteCompleted(S.lines);
-  renderList();
-  scheduleSave();
-  showToast(`已删除 ${n} 条 · Ctrl+Z 撤销`,
-    withUnfinished ? `其中 ${withUnfinished} 条待办下有未勾选的子待办` : '',
-    undo);
-  log(`cleared ${n} completed (${withUnfinished} with unfinished children)`);
+  const r = list.deleteCompleted();
+  if (!r) return;
+  showToast(`已删除 ${r.n} 条 · Ctrl+Z 撤销`,
+    r.unfinished ? `其中 ${r.unfinished} 条待办下有未勾选的子待办` : '',
+    undoNow);
+  log(`cleared ${r.n} completed (${r.unfinished} with unfinished children)`);
 }
 
 /* ---------- 回执浮层 ----------
@@ -601,22 +541,11 @@ function hideToast() {
   toastEl.onclick = null;
 }
 
-function groupBlockEnd(i) {
-  // todo.pyw:981-986；0.4.0 起与拖动排序共用同一个行块定义
-  return md.blockEnd(S.lines, i);
-}
-
 function insertGroup(i) {
   // todo.pyw:988-997
-  pushUndo();
-  const pos = groupBlockEnd(i);
-  if (pos - 1 >= 0 && pos - 1 < S.lines.length && !S.lines[pos - 1].raw.endsWith('\n')) {
-    S.lines[pos - 1].raw += S.nl;
-  }
-  S.lines.splice(pos, 0, md.parseLine('**新分组**' + S.nl));
-  renderList();
-  scheduleSave();
-  setTimeout(() => editRow(pos), 30);
+  const at = md.blockEnd(list.lines(), i);
+  const pos = list.insert(at, 'header', '', '新分组');
+  if (pos >= 0) setTimeout(() => editRow(pos), 30);
 }
 
 /* ---------- 行内加号（ADR 0007） ----------
@@ -864,11 +793,7 @@ function dropDrag(ev) {
   const fresh = S.lines === DND.lines;   // 拖到一半文件被外部改过（轮询重载换了数组）就放弃
   cleanupDrag();
   if (!fresh || !inside || slot < 0) return;   // 拖出窗口或没有合法落点 = 取消，不写不记撤销
-  pushUndo();
-  S.lines = md.moveBlock(S.lines, from, slot, S.nl);
-  renderList();
-  scheduleSave();
-  log(`drag move ${from} -> ${slot}`);
+  if (list.move(from, slot)) log(`drag move ${from} -> ${slot}`);
 }
 
 function cleanupDrag() {
@@ -993,19 +918,8 @@ function menuBlank(x, y) {
 
 /* ---------- 详情面板（todo.pyw:1074-1261） ---------- */
 
-function locateAnchor() {
-  const [text, units] = S.panelAnchor;
-  for (let k = 0; k < S.lines.length; k += 1) {
-    const ln = S.lines[k];
-    if (ln.kind === 'todo' && ln.text === text && md.indentUnits(ln.indent) === units) return k;
-  }
-  return -1;
-}
-
 function openPanel(i) {
-  const ln = S.lines[i];
-  S.panelAnchor = [ln.text, md.indentUnits(ln.indent)];
-  S.panelTodo = i;
+  list.setPanel(i);
   S.panelOpen = true;
   invoke('panel_open');
   pushPanelData();
@@ -1014,8 +928,7 @@ function openPanel(i) {
 function closePanel() {
   if (!S.panelOpen) return;
   S.panelOpen = false;
-  S.panelTodo = -1;
-  S.panelAnchor = null;
+  list.setPanel(-1);
   resolveCommit();
   invoke('panel_close');
   emitTo('panel', 'panel-hide', {});
@@ -1029,18 +942,18 @@ function refreshPanel(focusIdx) {
 
 function pushPanelData(focusIdx) {
   if (!S.panelOpen) return;
-  const i = locateAnchor();
+  const i = list.panelIndex();   // 锚点是文字 + 缩进层级，模块每次改动后自己跟着走
   if (i < 0) {
     log('panel target gone -> close');
     closePanel();
     return;
   }
-  S.panelTodo = i;
-  const [todos, notes] = md.panelParts(S.lines, i);
+  const lines = list.lines();
+  const [todos, notes] = md.panelParts(lines, i);
   emitTo('panel', 'panel-data', {
-    title: S.lines[i].text,
-    todos: todos.map((j) => ({ j, checked: S.lines[j].checked, text: S.lines[j].text })),
-    notes: notes.map((j) => ({ j, text: S.lines[j].text })),
+    title: lines[i].text,
+    todos: todos.map((j) => ({ j, checked: lines[j].checked, text: lines[j].text })),
+    notes: notes.map((j) => ({ j, text: lines[j].text })),
     focusIdx: focusIdx === undefined ? null : focusIdx,
   });
 }
@@ -1065,13 +978,8 @@ function panelReqHandler(ev) {
       toggleLine(d.j);
       break;
     case 'edit-commit':
-      // Tk p_edit commit(1323-1333)：push_undo/set_line_text/render_list/schedule_save
-      if (d.j >= 0 && d.j < S.lines.length) {
-        pushUndo();
-        md.setLineText(S.lines[d.j], d.value);
-        renderList();
-        scheduleSave();
-      }
+      // Tk p_edit commit(1323-1333)：改这一行文字，其余交给清单模块
+      list.setText(d.j, d.value);
       resolveCommit();
       break;
     case 'edit-cancel':
@@ -1080,16 +988,9 @@ function panelReqHandler(ev) {
       refreshPanel();
       break;
     case 'rename': {
-      // Tk p_rename commit(1379-1393)：先恢复标题，改字后同步锚
-      const i = S.panelTodo;
-      if (i >= 0 && i < S.lines.length) {
-        pushUndo();
-        md.setLineText(S.lines[i], d.value);
-        const ln = S.lines[i];
-        S.panelAnchor = [ln.text, md.indentUnits(ln.indent)];
-        renderList();
-        scheduleSave();
-      }
+      // Tk p_rename commit(1379-1393)：锚点跟着改过的标题走（setText 的收尾会刷新锚）
+      const i = list.panelIndex();
+      if (i >= 0) list.setText(i, d.value);
       resolveCommit();
       break;
     }
@@ -1108,14 +1009,8 @@ function panelReqHandler(ev) {
       break;
     case 'move': {
       // 0.4.0：面板里拖动排序（只在同一栏内，跨栏不合法）。真搬行只在这里做。
-      const to = d.where === 'before' ? d.anchor : md.blockEnd(S.lines, d.anchor);
-      if (md.canMove(S.lines, d.from, to)) {
-        pushUndo();
-        S.lines = md.moveBlock(S.lines, d.from, to, S.nl);
-        renderList();
-        scheduleSave();   // renderList 已经顺带 refreshPanel，面板行会重建
-        log(`panel drag move ${d.from} -> ${to}`);
-      }
+      const to = d.where === 'before' ? d.anchor : md.blockEnd(list.lines(), d.anchor);
+      if (list.move(d.from, to)) log(`panel drag move ${d.from} -> ${to}`);
       break;
     }
     case 'close':
@@ -1134,28 +1029,31 @@ function panelReqHandler(ev) {
 
 function pAddTodo() {
   // todo.pyw:1435-1443
-  const i = S.panelTodo;
-  if (!(i >= 0 && i < S.lines.length)) return;
-  const [todos] = md.panelParts(S.lines, i);
+  const i = list.panelIndex();
+  const lines = list.lines();
+  if (!(i >= 0 && i < lines.length)) return;
+  const [todos] = md.panelParts(lines, i);
   const pos = todos.length ? todos[todos.length - 1] : i;
-  insertLine(pos, 'todo', md.childIndent(S.lines[i]), '新待办', { inPanel: true });
+  insertLine(pos, 'todo', md.childIndent(lines[i]), '新待办', { inPanel: true });
 }
 
 function pAddNote() {
   // todo.pyw:1445-1452
-  const i = S.panelTodo;
-  if (!(i >= 0 && i < S.lines.length)) return;
-  const pos = md.subtreeEnd(S.lines, i) - 1;
-  insertLine(pos, 'note', md.childIndent(S.lines[i]), '', { inPanel: true });
+  const i = list.panelIndex();
+  const lines = list.lines();
+  if (!(i >= 0 && i < lines.length)) return;
+  const pos = md.subtreeEnd(lines, i) - 1;
+  insertLine(pos, 'note', md.childIndent(lines[i]), '', { inPanel: true });
 }
 
 function pAddBelow(kind, j) {
   // ADR 0007：面板行上的加号。只挂在这一栏里看得见的行上，缩进原样抄它
   // （父待办换过缩进也不会串），备注插空文字直接进编辑。
   // 待办得像主窗口那样落在整棵子块之后：插在 j+1 会把它下面的行抢成自己的孩子。
-  if (!(j >= 0 && j < S.lines.length)) return;
-  const ref = md.subtreeEnd(S.lines, j) - 1;
-  insertLine(ref, kind, S.lines[j].indent, kind === 'todo' ? '新待办' : '', { inPanel: true });
+  const lines = list.lines();
+  if (!(j >= 0 && j < lines.length)) return;
+  const ref = md.subtreeEnd(lines, j) - 1;
+  insertLine(ref, kind, lines[j].indent, kind === 'todo' ? '新待办' : '', { inPanel: true });
 }
 
 /* ---------- 文件/窗口杂项（todo.pyw:1488-1538） ---------- */
@@ -1180,10 +1078,10 @@ async function chooseFile() {
 async function newFile() {
   await requestPanelCommit();    // 面板里改了一半的任务名先落回来，别丢
   // 再把还没落盘的改动写回去：切走之后 S.lines 马上就换成新文件的内容
-  const pending = !!S.saveTimer;
-  cancelSave();
+  const pending = list.pending();
+  list.cancelSave();
   closeEditor();
-  if (pending && S.loaded && !S.missingShown) await writeText(md.serialize(S.lines));
+  if (pending && S.loaded && !S.missingShown) await writeText(list.text());
   let res;
   try {
     res = await invoke('new_md_file', { content: starterText('\r\n') });
@@ -1243,12 +1141,12 @@ async function exitApp() {
     await requestPanelCommit();
     closeEditor();
     closePanel();
-    cancelSave();
+    list.cancelSave();
     // 没装载成功就绝不写盘（0.4.0 修）：以前无条件写，退出一次就"生"出一个空文件，
     // 下次启动看着像本来就有文件，示例内容和新建引导再也不会出现；
     // 读取失败（比如文件不是 UTF-8）时同理——内存里那份空清单不是文件的内容。
-    if (S.loaded && !S.missingShown && await writeText(md.serialize(S.lines))) {
-      log(`saved ${S.lines.length} lines`);
+    if (S.loaded && !S.missingShown && await writeText(list.text())) {
+      log(`saved ${list.lines().length} lines`);
     }
   } catch (e) { /* Tk on_close 同款吞异常 */ }
   log('exit');
@@ -1292,7 +1190,7 @@ const ICON_TRASH_SVG = '<svg viewBox="0 0 13 13" fill="none">'
 function updateClearButton() {
   const btn = $('btn-clear-done');
   if (!btn) return;
-  const n = listReady() ? md.completedScan(S.lines).length : 0;
+  const n = listReady() ? md.completedScan(list.lines()).length : 0;
   btn.disabled = n === 0;
   btn.title = n > 0 ? `删除已完成（${n}）` : '删除已完成';
 }
@@ -1350,9 +1248,9 @@ function bindChrome() {
   // Ctrl+Z（todo.pyw:510, 1009-1023）
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-      if (S.edit || S.panelEditing || !S.undoStack.canUndo()) return;
+      if (S.edit || S.panelEditing || !list.canUndo()) return;
       e.preventDefault();
-      undo();
+      undoNow();
     } else if (e.key === 'Escape') {
       if (DND.on) { e.preventDefault(); cleanupDrag(); return; }   // 0.4.0：Esc 取消拖动
       hideMenu();
@@ -1399,8 +1297,7 @@ async function boot() {
   await window.__TAURI__.event.listen('panel-close', () => {
     // Rust 侧面板被系统关闭（Alt+F4 等）→ 主窗口同步清状态
     S.panelOpen = false;
-    S.panelTodo = -1;
-    S.panelAnchor = null;
+    list.setPanel(-1);
     resolveCommit();
   });
   await window.__TAURI__.event.listen('panel-ready', () => {

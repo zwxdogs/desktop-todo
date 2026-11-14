@@ -32,4 +32,4 @@ After ANY change to source code — adding a feature, fixing a bug, refactoring,
 2. Update the local deployment at `E:\桌面待办\DesktopTodo`: stop the running `DesktopTodo.exe` process, replace `DesktopTodo.exe` from `dist\DesktopTodo\`, keep `config.json` untouched, and delete the legacy PyInstaller `_internal\` directory if it still exists.
 3. Restart the app so the user can test the new build immediately.
 
-Tests: `node --test app/ui/*.test.js` (118). `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).
+Tests: `node --test app/ui/*.test.js` (144). `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).
