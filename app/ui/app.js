@@ -56,7 +56,7 @@ const S = {
   loaded: false,   // 内存里的清单是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
   edit: null,            // { index, input, handle }
   panelOpen: false,
-  panelEditing: false,   // 面板窗口里有未提交编辑
+  panelEditing: false,   // 面板窗口里有未落定的编辑
   quitting: false,
 };
 
@@ -677,7 +677,7 @@ function closePanel() {
   log('panel closed');
 }
 
-/* 收起面板，但先把面板里未提交的编辑落回清单（#16 验收：关面板不丢字）。
+/* 收起面板，但先把面板里未落定的编辑落回清单（#16 验收：关面板不丢字）。
    Tk close_panel 开头就是 _commit_edits，这里是它的跨窗口等价物。
 
    一律走一趟落定，不看 S.panelEditing：那条通知只是「面板里有没有字」的提示，
@@ -715,10 +715,10 @@ function pushPanelData(focusIdx) {
 
 /* 面板编辑需先落定再动清单（Tk _commit_edits 的跨窗口等价物）。
    #16：等面板的显式回执，回执里带着它本来要交的操作——照着落，不猜。
-   返回 true = 已落定（或没有内容要落），false = 没等到回执。
-   「没等到」时调用方可以继续（面板页已经死了，它那份编辑本来就取不回来），
-   但那是一条要记下来的告警，不是「大概落定完了吧」。
-   没握手时不发请求——协议自己也会挡（它会记一条「还没握手」并回 null）。 */
+   返回 false = 没等到回执。调用方可以继续（面板页已经死了，它那份编辑本来就
+   取不回来），但那是一条要记下来的告警，不是「大概落定完了吧」；
+   退出那条路会把 false 记进日志，好让下一次排查有据可查。
+   没握手时不发请求——协议自己也会挡（它记一条「还没握手」并回 null）。 */
 async function flushPanel() {
   if (!S.panelOpen) return true;
   const ops = await panel.flush();
@@ -754,7 +754,7 @@ const PANEL_HANDLERS = {
   /* 面板自己请求收起：它在发这条之前已经 commitPending 把未定稿的编辑交出来了
      （setText / rename 先走一条），所以这里只收窗口，不再反向要一次落定。 */
   close: () => closePanel(),
-  // 面板里有未提交的编辑：主窗口据此放过 Ctrl+Z 与退出前的收尾
+  // 面板里有未落定的编辑：主窗口据此放过 Ctrl+Z 与退出前的收尾
   editing: (m) => { S.panelEditing = !!m.on; },
   /* 面板页（重新）握手：面板重载后本地状态全没了，得把当前内容再推一遍，
      否则它停在空白上直到下一次清单重画。 */
@@ -804,7 +804,7 @@ function pAddBelow(kind, j) {
    只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。
 
    顺序要紧：**先落定、再采纳新身份**。落定会走 list.setText，而它排的写盘用的是
-   S.file——身份先换掉的话，面板里那份没提交的字会被写到新文件上去。 */
+   S.file——身份先换掉的话，面板里那份没落定的字会被写到新文件上去。 */
 async function switchToFile(identity) {
   await closePanelSaving();   // 面板里改了一半的先落回旧文件
   adoptFile(identity);
@@ -889,7 +889,9 @@ async function exitApp() {
   if (S.quitting) return;
   S.quitting = true;
   try {
-    await flushPanel();    // 面板里未提交的编辑先落回清单，再写盘退出（未提交的编辑不丢）
+    // 面板里没落定的编辑先交回清单，再写盘退出。回执没到就照常退——
+    // 面板页已经答不上话了，干等只会让「关不掉」；但这一条要留下痕迹。
+    if (!(await flushPanel())) log('exit: 面板落定回执没来，退出前可能有字没落盘');
     closeEditor();
     closePanel();          // 编辑已落定，这里只是收起窗口
     list.cancelSave();

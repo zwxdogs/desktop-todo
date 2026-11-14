@@ -241,7 +241,7 @@ test("start 时处理函数不齐只记日志，不阻止启动", async () => {
   assert.doesNotMatch(joined, /hide/);
 });
 
-test("落定：面板回显式回执，主窗口拿到面板本来要提交的操作", async () => {
+test("落定：面板回显式回执，主窗口拿到面板本来要交的操作", async () => {
   const { main, panel, deliver, outbox } = wire();
   await main.start({});
   let pending = null;   // 面板侧的未定稿编辑

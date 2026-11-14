@@ -34,7 +34,9 @@ const EVENT = { [TO_MAIN]: 'proto-to-main', [TO_PANEL]: 'proto-to-panel' };
    kind = 'op'      面板对清单的一次操作（落定回执里可以一起交回）
         = 'notice'  面板的状态与握手（回执由协议自己处理）
         = 'command' 主窗口对面板的命令
-   caption 只给人看，代码不读它。 */
+   caption 只给人看，代码不读它。
+   载荷里的 `j` 是清单里的行下标（面板两栏的行都用它定位），沿用 panel.js / list.js
+   里同一套叫法，别在协议里另起一个名字。 */
 export const TABLE = [
   // —— 面板 → 主窗口：清单操作（新增一个面板操作 = 这里加一行 + 主窗口给一个处理函数）——
   { name: 'toggle', kind: 'op', dir: TO_MAIN, fields: ['j'], caption: '勾选 / 取消这一行' },
@@ -65,7 +67,8 @@ export const TABLE = [
 const byName = new Map(TABLE.map((m) => [m.name, m]));
 
 /* 两条由协议自己处理的消息：窗口不必各装一个空处理函数。
-   HELLO（握手）与 RECEIPT（落定回执）是协议的一部分，不是窗口的业务。 */
+   HELLO（握手）与 RECEIPT（落定回执）是协议的一部分，不是窗口的业务。
+   名字只在这里写一次；窗口那边用它回执（`proto.send(proto.RECEIPT, …)`）。 */
 const HELLO = 'hello';
 const RECEIPT = 'receipt';
 const INTERNAL = new Set([HELLO, RECEIPT]);
@@ -245,7 +248,7 @@ export function createProtocol({ side, link, log = () => {}, flushTimeoutMs = 80
     post(encode(row, op), row);
   }
 
-  /* 主窗口请面板落定：等显式回执，回执里带着面板本来要提交的操作。
+  /* 主窗口请面板落定：等显式回执，回执里带着面板本来要交的操作。
      超时只记一条告警并 resolve(null) —— 正确性不挂在墙钟上。 */
   function flush() {
     if (side !== MAIN) return Promise.reject(new Error('只有主窗口能请求落定'));
@@ -296,6 +299,10 @@ export function createProtocol({ side, link, log = () => {}, flushTimeoutMs = 80
     flush,
     /* 再喊一声 hello：面板窗口比主窗口晚建时，主窗口「要用了」就重喊一次。 */
     announce,
+    /* 协议自己处理的两条消息名：窗口回执时用它，别在窗口里另写一份字面量。 */
+    HELLO,
+    RECEIPT,
+    /* 观察面（测试与排查用）：握手状态、还有几条消息在等握手。 */
     peerReady: () => peerReady,
     queued: () => queue.length,
   };

@@ -5,7 +5,7 @@
    - 内联编辑/标题改名在本地进行，落定时回传（Tk p_edit/p_rename 的 commit/cancel）
    0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。
    #16 起跨窗消息全走 panelproto.js：消息名、方向、字段只在那张表里定义，
-   这里只装三个处理函数（data / flush / hide/hello）、按名字发操作。 */
+   这里只装三个处理函数（data / flush / hide），按名字发操作。 */
 
 'use strict';
 
@@ -16,18 +16,26 @@ import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
 import { connect, PANEL, requireHost } from './panelproto.js';
 
+/* 宿主对象只取一次（与 app.js 同一个 host() 形状）：Tauri 的 withGlobalTauri
+   把它作为初始化脚本注入，早于任何页面脚本，所以取不到就是真没注入。 */
+let HOST = null;
+function host() {
+  if (!HOST) HOST = requireHost();
+  return HOST;
+}
+
 const log = (msg) => {
-  const host = typeof window !== 'undefined' ? window.__TAURI__ : null;
-  if (!host || !host.core) { console.error('panel: ' + msg); return; }
-  try { host.core.invoke('log_line', { msg: 'panel: ' + msg }); } catch (_) { /* ignore */ }
+  try { host().core.invoke('log_line', { msg: 'panel: ' + msg }); } catch (_) {
+    // 连宿主对象都拿不到：只能落在 devtools 控制台
+    console.error('panel: ' + msg);
+  }
 };
 /* 先挂错误钩子：下面任何一步抛错都要留痕（ADR 0008 的同类处理） */
 window.onerror = (msg, src, line) => { log('js error: ' + msg + ' @' + src + ':' + line); };
 window.onunhandledrejection = (ev) => { log('js rejection: ' + ev.reason); };
 
-/* 宿主对象由注入脚本在页面脚本之前写好：取不到就是真的没注入，当场报错，
-   不再每 20ms 轮询（#16）。两窗走同一个 connect。 */
-const proto = connect({ side: PANEL, getHost: requireHost, log });
+/* 两窗走同一个 connect：链路、握手、落定都由协议模块负责。 */
+const proto = connect({ side: PANEL, getHost: host, log });
 
 const $ = (id) => document.getElementById(id);
 const titleEl = $('panel-title');
@@ -44,10 +52,8 @@ const P = {
   renaming: false,
 };
 
-/* 面板对清单的一次操作：名字与字段由协议表校验，发错当场抛。 */
-function req(name, args = {}) { proto.send(name, args); }
-
-function setEditing(on) { req('editing', { on }); }
+/* 面板对清单的一次操作：proto.send 按协议表校验名字与字段，发错当场抛。 */
+function setEditing(on) { proto.send('editing', { on }); }
 
 /* ---------- 行构建（Tk p_build_row 1263-1303：全部顶格 pad=12） ---------- */
 
@@ -62,15 +68,11 @@ function boxSvg(checked) {
     '<rect x="2" y="2" width="14" height="14" fill="none" stroke="#C6CCD4" stroke-width="1"/></svg>';
 }
 
-/* 离开编辑态前先把未定稿的文字交回去（删除/插行都走这里）。
-   顺序要紧：先 teardown 再提交——主窗口回推新一轮数据时若还挂着 P.edit，
-   onData 会再提交一次并 return，把那一轮渲染吞掉（新行就进不了编辑）。 */
+/* 删除/插行之前先把未定稿的内联编辑落回去（Tk delete_line 前的 _commit_edits）。
+   顺序要紧：先 teardown 再发——主窗口回推新一轮数据时若还挂着 P.edit，
+   onData 会再落一遍并 return，把那一轮渲染吞掉（新行就进不了编辑）。 */
 function commitPending() {
-  if (!P.edit) return;
-  const { j, input } = P.edit;
-  const value = input.value;
-  teardownEdit();
-  commitEdit(j, value);   // commitEdit 自己会 setEditing(false)，这里别再发一次
+  for (const op of harvest('deliver')) proto.sendOp(op);
 }
 
 function pMenu(j, x, y) {
@@ -78,9 +80,9 @@ function pMenu(j, x, y) {
   menu.show([
     { label: '编辑', fn: () => pEdit(j) },
     { label: '删除', fn: () => {
-        // Tk delete_line 前会 _commit_edits：先提交未定稿编辑再删
+        // Tk delete_line 前会 _commit_edits：先落定未定稿编辑再删
         commitPending();
-        req('remove', { j });
+        proto.send('remove', { j });
       } },
   ], x, y);
 }
@@ -100,7 +102,7 @@ function buildRow(container, item, isTodo) {
     box.className = 'box';
     box.innerHTML = boxSvg(item.checked);
     box.style.marginLeft = '12px';
-    box.addEventListener('click', () => req('toggle', { j: item.j }));
+    box.addEventListener('click', () => proto.send('toggle', { j: item.j }));
     row.appendChild(box);
   }
 
@@ -142,7 +144,7 @@ function makePaneDrag(pane) {
     },
     resolve: (rows, y) => panelDropTarget(rows, pane.getBoundingClientRect(), y),
     lineRight: () => window.innerWidth - 8,
-    onDrop: (from, target) => req('move', { from, anchor: target.rowKey, where: target.where }),
+    onDrop: (from, target) => proto.send('move', { from, anchor: target.rowKey, where: target.where }),
   });
 }
 
@@ -175,7 +177,7 @@ function addPlus(row, j, kind) {
   p.addEventListener('click', (e) => {
     e.stopPropagation();
     commitPending();
-    req('addBelow', { kind, j });
+    proto.send('addBelow', { kind, j });
   });
   p.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -212,7 +214,7 @@ function render(d) {
   if (focusLabel) pEditAt(focusLabel);
 }
 
-/* ---------- 行内编辑（Tk p_edit 1305-1347） ---------- */
+/* ---------- 内联编辑（Tk p_edit 1305-1347） ---------- */
 
 function pEdit(j) {
   if (P.edit || P.renaming) return;
@@ -239,8 +241,8 @@ function pEditAt(lbl, j) {
       if (!P.edit || P.edit.handle !== handle) return;
       const jj = P.edit.j;
       teardownEdit();
-      req('discardEdit', { j: jj });
-      req('editing', { on: false });
+      proto.send('discardEdit', { j: jj });
+      proto.send('editing', { on: false });
     },
   });
   P.edit = { j: idx, input: handle.input, handle };
@@ -277,7 +279,7 @@ function teardownEdit() {
 function commitEdit(j, value) {
   // Tk p_edit commit(1323-1333)：主窗口应用后重推内容
   setEditing(false);
-  req('setText', { j, value });
+  proto.send('setText', { j, value });
 }
 
 /* ---------- 标题改名（Tk p_rename 1362-1420） ---------- */
@@ -307,19 +309,19 @@ titleEdit.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const v = titleEdit.value;
     teardownRename();
-    req('rename', { value: v });
+    proto.send('rename', { value: v });
   } else if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
     teardownRename();
-    req('discardRename', {});
+    proto.send('discardRename', {});
   }
 });
 titleEdit.addEventListener('blur', () => {
   if (P.renaming) {
     const v = titleEdit.value;
     teardownRename();
-    req('rename', { value: v });
+    proto.send('rename', { value: v });
   }
 });
 titleEdit.addEventListener('compositionend', () => titleEdit.focus());
@@ -335,16 +337,15 @@ document.addEventListener('mousedown', (e) => {
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 /* 收起面板：先把未定稿的编辑交出去（Tk close_panel 开头就是 _commit_edits），
-   再请主窗口关。行内编辑与标题改名都要交，否则点 ✕ 那一刻改了一半的标题会没。 */
+   再请主窗口关。内联编辑与标题改名都要交，否则点 ✕ 那一刻改了一半的标题会没。 */
 function requestClose() {
-  const ops = pendingOps();      // 行内编辑与改名都在里面，且已清掉本地编辑态
-  for (const op of ops) proto.sendOp(op);
-  req('close', {});
+  commitPending();   // harvest('deliver')：内联编辑与改名一起交，并清掉本地编辑态
+  proto.send('close', {});
 }
 $('panel-x').addEventListener('click', requestClose);
 $('panel-x').addEventListener('mousedown', (e) => e.preventDefault());
-$('add-todo').addEventListener('click', () => { commitPending(); req('addTodo', {}); });
-$('add-note').addEventListener('click', () => { commitPending(); req('addNote', {}); });
+$('add-todo').addEventListener('click', () => { commitPending(); proto.send('addTodo', {}); });
+$('add-note').addEventListener('click', () => { commitPending(); proto.send('addNote', {}); });
 for (const id of ['panel-x', 'add-todo', 'add-note']) {
   $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
 }
@@ -369,44 +370,47 @@ document.addEventListener('contextmenu', (e) => {
 
 /* ---------- 协议处理函数（表里的每一条收消息都在这儿有唯一实现） ---------- */
 
-/* 把未定稿的编辑收成操作、并就地清掉本地编辑态。落定回执与本地提交共用这一份，
-   所以「回执里有什么」= 「面板本来要交什么」，不会有两套说法。 */
-function pendingOps() {
+/* 把未定稿的编辑收成操作、并就地清掉本地编辑态。
+   标题改名有两种政策，Tk 也是两种，所以这里明写出来：
+   - 'deliver'：落定与收起时把改名交出去 —— 用户打的字不能丢。
+   - 'drop'：数据被重推时丢弃改名（Tk _p_restore_title）—— 新一轮内容里的标题
+     已经是权威的，再把手里这份旧值交上去会把它盖掉。
+   内联编辑两种政策都是交出去（Tk 两种路径都先 _p_close_editor）。 */
+function harvest(policy) {
+  const ops = [];
   if (P.edit) {
     const { j, input } = P.edit;
     const value = input.value;
     teardownEdit();
     setEditing(false);
-    return [proto.op('setText', { j, value })];
+    ops.push(proto.op('setText', { j, value }));
   }
   if (P.renaming) {
     const value = titleEdit.value;
     teardownRename();   // 已含 setEditing(false)
-    return [proto.op('rename', { value })];
+    if (policy === 'deliver') ops.push(proto.op('rename', { value }));
   }
-  return [];
+  return ops;
 }
 
 function onData(d) {
   log('data received: title=' + d.title + ' todos=' + d.todos.length + ' notes=' + d.notes.length);
-  // Tk render_panel(1234-1235)：先 _p_close_editor（提交），再 _p_restore_title（丢弃改名）
-  if (P.renaming) teardownRename();
-  if (P.edit) {
-    const { j, input } = P.edit;
-    teardownEdit();
-    commitEdit(j, input.value);   // 自带 setEditing(false)；主窗口应用后会再推一轮数据
-    return;                        // 等下一轮 data 再渲染
+  // Tk render_panel(1234-1235)：先 _p_close_editor（落定），再 _p_restore_title（丢弃改名）
+  const ops = harvest('drop');
+  if (ops.length) {
+    for (const op of ops) proto.sendOp(op);   // 主窗口应用后会再推一轮数据
+    return;                                    // 等下一轮 data 再渲染
   }
   P.data = d;
   render(d);
 }
 
 /* 主窗口请求落定：把未定稿的编辑交回去，再回显式回执。
-   回执本身就是「面板本来要提交什么」的完整答案，主窗口照着落，
-   不再靠一个 400ms 墙钟猜「大概提交完了吧」。 */
+   回执本身就是「面板本来要交什么」的完整答案，主窗口照着落，
+   不再靠一个 400ms 墙钟猜「大概落定完了吧」。 */
 function onFlush(m) {
-  const ops = pendingOps();
-  proto.send('receipt', { id: m.id, ops });
+  const ops = harvest('deliver');
+  proto.send(proto.RECEIPT, { id: m.id, ops });
 }
 
 /* 面板被收起：清本地编辑态（Tk close_panel 清空状态）。
