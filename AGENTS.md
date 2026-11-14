@@ -14,7 +14,7 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/d
 
 ### Rust shell layout
 
-`app/src-tauri/src/main.rs` is only a 4-line process shell (`windows_subsystem` + `app::run()`); everything lives in `lib.rs` and its modules, each owning one seam — `win32` (the only place with `unsafe extern`), `geometry`, `consts`, `dialog`, `config`, `files`, `state` (the `Host` handle; nobody outside a module touches its lock), `persist`, `dock` (two modes; `dock::enter` is the single call that pins to the desktop), `panel`, `tray`, `watchdog`, `exit`, `maintenance` (the five named poll steps), `commands` (parameter adapters only — no Win32, no locks), `app` (startup wiring). Keep new code inside the module that owns the state it touches; don't reintroduce a shared grab-bag struct.
+`app/src-tauri/src/main.rs` is only a 4-line process shell (`windows_subsystem` + `app::run()`); everything lives in `lib.rs` and its modules, each owning one seam — `win32` (the only place with `unsafe extern`), `geometry`, `consts`, `dialog`, `config`, `files`, `state` (the `Host` handle; nobody outside a module touches its lock), `persist`, `dock` (two modes; `dock::enter` is the single call that pins to the desktop), `panel`, `theme` (亮 / 暗 / 跟随系统 three-state; the only place that calls `Window::set_theme`, and it must hit `main` **and** `panel`), `tray`, `watchdog`, `exit`, `maintenance` (the five named poll steps), `commands` (parameter adapters only — no Win32, no locks), `app` (startup wiring). Keep new code inside the module that owns the state it touches; don't reintroduce a shared grab-bag struct.
 
 ### Baseline
 

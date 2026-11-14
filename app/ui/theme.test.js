@@ -110,19 +110,40 @@ test("深色下勾选框的三块色都换了一档", () => {
   }
 });
 
+test("深色不许有变量与亮色同值（除了有意保持的）", () => {
+  // 复审抓到的真 bug：--c-grip-hover 在深色块里抄了亮色的 #8B95A1，注释还写着「压一档」。
+  // 只在「两套该不同」的变量上断言——同值本身不一定是错，但抄漏是，所以给一份白名单。
+  const SAME_BY_DESIGN = new Set([
+    // 有意两套相同的：强调色在深色下提亮后，某些派生色仍可复用（当前没有），
+    // 真出现时在这里写一行并说明理由，别默默放过。
+  ]);
+  const light = varNames(lightBlock);
+  const same = [...light].filter((n) => !SAME_BY_DESIGN.has(n) && varValue(lightBlock, n) === varValue(darkBlock, n));
+  assert.deepEqual(same, [], `这些变量在深色下与亮色完全相同（多半是抄漏）：${same.join(", ")}`);
+});
+
 test("勾选框的色不写在 SVG 属性里", () => {
   // SVG presentation attribute 里 var() 各引擎行为不一致（w3c/svgwg#1031），
-  // 所以 app.js / panel.js 只输出 class，色在样式表里给。
+  // 所以 checkbox.js 只输出 class，色在样式表里给。
+  const src = stripComments(readFileSync(join(here, "checkbox.js"), "utf8"));
+  const at = src.indexOf("export function boxSvg");
+  assert.ok(at >= 0, "checkbox.js 里找不到 boxSvg");
+  const end = src.indexOf("\n}", at);
+  const boxFn = src.slice(at, end < 0 ? at + 900 : end);
+  assert.ok(boxFn.includes("box-fill"), "选中态的方块应带 box-fill 类");
+  assert.ok(boxFn.includes("box-tick"), "勾线应带 box-tick 类");
+  assert.ok(boxFn.includes("box-empty"), "未勾态的描边应带 box-empty 类");
+  assert.ok(!/#[0-9a-fA-F]{6}/.test(boxFn), "boxSvg 里不该再有硬编码色");
+});
+
+test("两个窗口共用同一份勾选框，不再各写一遍", () => {
+  // 复审指出的 Shotgun Surgery：本来 app.js 与 panel.js 各有一份逐字相同的 boxSvg，
+  // 深色主题这次要同时改两边的颜色。现在只有 checkbox.js 一份，两窗都是 import。
   for (const file of ["app.js", "panel.js"]) {
     const src = stripComments(readFileSync(join(here, file), "utf8"));
-    const at = src.indexOf("function boxSvg");
-    assert.ok(at >= 0, `${file} 里找不到 boxSvg`);
-    const end = src.indexOf("\n}", at);
-    const boxFn = src.slice(at, end < 0 ? at + 900 : end);
-    assert.ok(boxFn.includes("box-fill"), `${file}: 选中态的方块应带 box-fill 类`);
-    assert.ok(boxFn.includes("box-tick"), `${file}: 勾线应带 box-tick 类`);
-    assert.ok(boxFn.includes("box-empty"), `${file}: 未勾态的描边应带 box-empty 类`);
-    assert.ok(!/#[0-9a-fA-F]{6}/.test(boxFn), `${file}: boxSvg 里不该再有硬编码色`);
+    assert.ok(/import\s*\{[^}]*boxSvg[^}]*\}\s*from\s*['"]\.\/checkbox\.js['"]/.test(src),
+      `${file} 应从 checkbox.js 导入 boxSvg`);
+    assert.ok(!/function\s+boxSvg\s*\(/.test(src), `${file} 不该再自带一份 boxSvg`);
   }
 });
 

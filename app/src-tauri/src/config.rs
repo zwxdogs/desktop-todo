@@ -33,24 +33,19 @@ pub enum ThemePref {
 }
 
 /// 不认识的值 / null / 缺字段一律落 `system`：主题写错不该让人打不开待办。
+///
+/// 词表与「这个词对应哪一档」由 `theme` 模块拥有（它是主题色的所有者），这里只做
+/// 「把 JSON 那一段交给它」的适配。反过来把 `tauri::Theme` 映射塞进 `config` 是不行的：
+/// `config` 只该依赖 serde 与 std，`tauri` 一进来它就再也不是纯配置类型了。
+///
+/// **先当 JSON 值读，再从中取字符串**，而不是直接 `Option::<String>::deserialize`：
+/// 后者遇到 `"theme": 5` / `"theme": true` / `"theme": {}` 会报错，而 `from_text` 的
+/// `unwrap_or_default()` 会把**整份**配置连路径和几何一起丢掉——主题这一段写错不该
+/// 让人发现窗口位置也没了。这与 `string_or_empty` / `bool_or_false` 那条「单个字段坏
+/// 不判死整份」的约定是同一件事。
 fn theme_or_system<'de, D: Deserializer<'de>>(d: D) -> Result<ThemePref, D::Error> {
-    let raw = Option::<String>::deserialize(d)?;
-    Ok(match raw.as_deref() {
-        Some("light") => ThemePref::Light,
-        Some("dark") => ThemePref::Dark,
-        _ => ThemePref::System,
-    })
-}
-
-impl ThemePref {
-    /// 落到窗口的 `set_theme` 语义：`None` = 跟随系统。
-    pub fn to_window_theme(self) -> Option<tauri::Theme> {
-        match self {
-            ThemePref::System => None,
-            ThemePref::Light => Some(tauri::Theme::Light),
-            ThemePref::Dark => Some(tauri::Theme::Dark),
-        }
-    }
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(crate::theme::from_word(raw.as_ref().and_then(|v| v.as_str())))
 }
 
 /// config.json 的唯一定义。
@@ -161,21 +156,13 @@ mod config_tests {
     fn every_theme_value_round_trips_as_a_lowercase_word() {
         // 验收「选暗色后重启仍是暗色」的最小模型：三态各自写出去再读回来，值不变。
         // 顺带钉住字节形态：config.json 是用户可能手改的文件，写出去得是人能读的字。
-        for (pref, written) in
-            [(ThemePref::System, "\"system\""), (ThemePref::Light, "\"light\""), (ThemePref::Dark, "\"dark\"")]
-        {
+        // 词表本身由 `theme::word` 拥有，这里只验「它真被写进 config 并且能读回来」。
+        for pref in crate::theme::all() {
+            let written = crate::theme::word(pref);
             let cfg = Config { theme: pref, ..Config::default() };
             let text = serde_json::to_string_pretty(&cfg).unwrap();
-            assert!(text.contains(&format!("\"theme\": {}", written)), "{} 应写成 {}", pref_str(pref), written);
-            assert_eq!(Config::from_text(&text).theme, pref, "{} 必须原样读回", pref_str(pref));
-        }
-    }
-
-    fn pref_str(p: ThemePref) -> &'static str {
-        match p {
-            ThemePref::System => "system",
-            ThemePref::Light => "light",
-            ThemePref::Dark => "dark",
+            assert!(text.contains(&format!("\"theme\": \"{}\"", written)), "{} 应写成 \"{}\"", written, written);
+            assert_eq!(Config::from_text(&text).theme, pref, "{} 必须原样读回", written);
         }
     }
 
@@ -191,12 +178,17 @@ mod config_tests {
     }
 
     #[test]
-    fn theme_maps_to_the_three_window_states() {
-        // 「跟随系统」落到 set_theme 的语义是 None（不是 Some(Light)）——这是三态的接缝，
-        // 写错就变成「选了跟随系统却钉死在亮色」。
-        assert_eq!(ThemePref::System.to_window_theme(), None, "跟随系统 = 不强制");
-        assert_eq!(ThemePref::Light.to_window_theme(), Some(tauri::Theme::Light));
-        assert_eq!(ThemePref::Dark.to_window_theme(), Some(tauri::Theme::Dark));
+    fn a_theme_that_is_not_even_a_string_does_not_kill_the_whole_config() {
+        // 写错类型（数字 / 布尔 / 数组 / 对象）曾经让反序列化直接失败，
+        // 而 from_text 用 unwrap_or_default 兜底 → 连文件路径和窗口几何一起丢掉。
+        // 「主题写错」的代价不该是「下次启动窗口跑到角落、当前文件也没了」。
+        for bad in ["5", "true", "[]", "{}"] {
+            let text = format!("{{\"file\": \"E:/项目/待办.md\", \"x\": 9, \"y\": 8, \"theme\": {}}}", bad);
+            let cfg = Config::from_text(&text);
+            assert_eq!(cfg.theme, ThemePref::System, "theme={} 应落跟随系统", bad);
+            assert_eq!(cfg.file, "E:/项目/待办.md", "theme={} 时路径必须还在", bad);
+            assert_eq!((cfg.x, cfg.y), (Some(9), Some(8)), "theme={} 时几何必须还在", bad);
+        }
     }
 
     /// 测试用的临时目录：放在 target/ 下（cargo 一定可写，%TEMP% 在受限账户下可能被拒）。

@@ -21,6 +21,7 @@ import {
   hasUnflushed, conflictPlan, nextConflict, isConflictOpen, conflictText, conflictFailText,
 } from './extconflict.js';
 import { fileNameOf, classifyReadError, loadFailure, canWriteList, loadNoticeText } from './readfail.js';
+import { boxSvg } from './checkbox.js';
 
 /* 宿主对象由 Tauri 的初始化脚本在页面脚本**之前**写好（withGlobalTauri），
    所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。
@@ -395,21 +396,8 @@ async function loadFile() {
 
 /* ---------- 渲染清单（todo.pyw:605-707） ---------- */
 
-function boxSvg(checked) {
-  // Tk draw_box(709-720)：选中=accent 方块+勾线；未选中=1px 描边（#23 深色下要看得清）
-  //
-  // 颜色不写字面量、也不写 var()：SVG 的 presentation attribute 里 var() 是否解析
-  // 各引擎不一致（w3c/svgwg#1031）。改成 class + 样式表给色，换主题就自动跟着走。
-  if (checked) {
-    return '<svg viewBox="0 0 18 18" fill="none">' +
-      '<rect class="box-fill" x="2" y="2" width="14" height="14"/>' +
-      '<polyline class="box-tick" points="5,9 8,12 13,5" stroke-width="2" ' +
-      'stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
-  }
-  return '<svg viewBox="0 0 18 18" fill="none">' +
-    '<rect class="box-empty" x="2" y="2" width="14" height="14" fill="none" stroke-width="1"/></svg>';
-}
-
+/* 勾选框的 SVG 来自 checkbox.js（主窗与面板共用一份）：两窗各写一遍会立刻变成
+   必须同步维护的东西，而这次深色主题恰好要同时改两边的颜色。 */
 function badgeCheckSvg() {
   // Tk _badge_check(786-791)：勾线 (1,9)→(4,12)→(9,5)，画布中心 y=9
   return '<svg class="badge-check" viewBox="0 0 10 18" fill="none">' +

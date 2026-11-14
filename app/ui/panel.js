@@ -15,6 +15,7 @@ import { createRowDrag, panelDropTarget, GRIP_SVG } from './rowdrag.js';
 import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
 import { connect, PANEL, requireHost } from './panelproto.js';
+import { boxSvg } from './checkbox.js';
 
 /* 宿主对象只取一次（与 app.js 同一个 host() 形状）：Tauri 的 withGlobalTauri
    把它作为初始化脚本注入，早于任何页面脚本，所以取不到就是真没注入。 */
@@ -57,17 +58,7 @@ function setEditing(on) { proto.send('editing', { on }); }
 
 /* ---------- 行构建（Tk p_build_row 1263-1303：全部顶格 pad=12） ---------- */
 
-function boxSvg(checked) {
-  // 颜色走 class + 样式表（不用 SVG presentation attribute 里的 var()，见 app.js 的 boxSvg）
-  if (checked) {
-    return '<svg viewBox="0 0 18 18" fill="none">' +
-      '<rect class="box-fill" x="2" y="2" width="14" height="14"/>' +
-      '<polyline class="box-tick" points="5,9 8,12 13,5" stroke-width="2" ' +
-      'stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
-  }
-  return '<svg viewBox="0 0 18 18" fill="none">' +
-    '<rect class="box-empty" x="2" y="2" width="14" height="14" fill="none" stroke-width="1"/></svg>';
-}
+/* 勾选框的 SVG 来自 checkbox.js，与主窗口同一份（#23 深色下两窗必须同时看得清）。 */
 
 /* 删除/插行之前先把未定稿的内联编辑落回去（Tk delete_line 前的 _commit_edits）。
    顺序要紧：先 teardown 再发——主窗口回推新一轮数据时若还挂着 P.edit，

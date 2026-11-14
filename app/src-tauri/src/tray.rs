@@ -15,8 +15,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 
 use crate::config::ThemePref;
 use crate::consts::{
-    APP_NAME, TRAY_DOCK, TRAY_QUIT, TRAY_SHOW, TRAY_THEME_DARK, TRAY_THEME_LIGHT, TRAY_THEME_PREFIX,
-    TRAY_THEME_SYSTEM,
+    APP_NAME, TRAY_DOCK, TRAY_QUIT, TRAY_SHOW, TRAY_THEME_DARK, TRAY_THEME_LIGHT, TRAY_THEME_SYSTEM,
 };
 use crate::dock;
 use crate::exit;
@@ -25,7 +24,7 @@ use crate::theme;
 
 /// 勾选态的同步通道（由常驻线程消费）。
 ///
-/// 停靠项与主题项各一条：主题三条要互斥，投递的是「该打勾的那一档」，而不是三条各自的真假。
+/// 停靠项与主题项各一条：主题三条要互斥，投递的是「该勾上的那一档」，而不是三条各自的真假。
 #[derive(Default)]
 pub struct TrayState {
     check_tx: Mutex<Option<Sender<bool>>>,
@@ -54,17 +53,13 @@ pub fn build(host: &Host, initial_dock: bool) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, TRAY_SHOW, "显示待办", true, None::<&str>)?;
     let dock_item = CheckMenuItem::with_id(app, TRAY_DOCK, "固定在桌面", true, initial_dock, None::<&str>)?;
 
-    // 主题色子菜单（#23）：三项互斥勾选，当前项打勾。默认「跟随系统」。
+    // 主题色子菜单（#23）：三项互斥勾选，当前项勾上。默认「跟随系统」。
     let pref = theme::current(host);
     let light_item = theme_check(app, TRAY_THEME_LIGHT, ThemePref::Light, pref)?;
     let dark_item = theme_check(app, TRAY_THEME_DARK, ThemePref::Dark, pref)?;
     let system_item = theme_check(app, TRAY_THEME_SYSTEM, ThemePref::System, pref)?;
-    let theme_menu = Submenu::with_items(
-        app,
-        "主题色",
-        true,
-        &[&light_item, &dark_item, &system_item],
-    )?;
+    let theme_menu =
+        Submenu::with_items(app, "主题色", true, &[&light_item, &dark_item, &system_item])?;
 
     let sep = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, TRAY_QUIT, "退出", true, None::<&str>)?;
@@ -89,7 +84,7 @@ pub fn build(host: &Host, initial_dock: bool) -> tauri::Result<()> {
     let (theme_tx, theme_rx) = std::sync::mpsc::channel::<ThemePref>();
     *host.state::<TrayState>().theme_tx.lock().unwrap() = Some(theme_tx);
     {
-        // 三项互斥：投递的是「该打勾的那一档」，落一次就是整组的新状态。
+        // 三项互斥：投递的是「该勾上的那一档」，落一次就是整组的新状态。
         // 与停靠项同理，set_checked 阻塞，只在这条线程里调用。
         let items = [(ThemePref::Light, light_item), (ThemePref::Dark, dark_item), (ThemePref::System, system_item)];
         std::thread::spawn(move || {
@@ -173,11 +168,11 @@ fn on_menu(host: &Host, id: &str) {
 }
 
 /// 菜单 id → 主题档位。不属于主题项的 id 回 None。
-/// 单独拎出来是为了让它可测：前缀分派错了，整张菜单点了都不会有反应。
+///
+/// 单独拎出来是为了让它可测：id 与档位的对应错了，整张菜单点了都不会有反应。
+/// 不加前缀判断：这张表里没有的 id 本来就回 None，「显示待办」「退出」不会被误吞，
+/// 而前缀多一层只是多一处可以对不上的东西（复审指出它并不买任何东西）。
 fn theme_pref_of(id: &str) -> Option<ThemePref> {
-    if !id.starts_with(TRAY_THEME_PREFIX) {
-        return None;
-    }
     match id {
         TRAY_THEME_LIGHT => Some(ThemePref::Light),
         TRAY_THEME_DARK => Some(ThemePref::Dark),

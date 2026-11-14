@@ -750,11 +750,13 @@ body.dragging .row:hover .badge { transform: none; }
     --c-thumb-hover: rgba(230, 237, 243, .46);
     --c-thumb-drag: rgba(230, 237, 243, .6);
 
-    /* 回执浮层：深底上改成浅底深字，才仍然「浮在清单上」 */
-    --c-toast: #E6EDF3;
-    --c-toast-text: #16191D;
-    --c-toast-hover: #C9D3DD;
-    --c-toast-sub: #4A5460;
+    /* 回执浮层：亮色下是深底浅字（浮在浅清单上），深色下不能翻成一块亮白——
+       那正是这张票要消灭的「深色壁纸上一块白方块」。改成比清单亮一档的深底 + 浅字：
+       与右键菜单同一个「浮起来的层」语义，靠层次区分而不是靠反差。 */
+    --c-toast: #2F3740;
+    --c-toast-text: #E6EDF3;
+    --c-toast-hover: #3A444E;
+    --c-toast-sub: #A9B4C0;
 
     /* 提示条四型：深底浅字，四型各留自己的色相 */
     --c-info-bg: #3A2F14;  --c-info-fg: #F0D48A;
@@ -763,8 +765,9 @@ body.dragging .row:hover .badge { transform: none; }
     --c-load-bg: #3A2A12;  --c-load-fg: #F0B67A;
     --c-load-hover: #493418;
 
-    /* 缩放把手：深底上原来的 #A8B0BC 太亮，压一档 */
+    /* 缩放把手：深底上原来的 #A8B0BC 太亮，压一档；悬停再提亮，
+       与亮色那套「常态 / 悬停」的关系保持一致（复审指出原来两套悬停值相同，等于没换） */
     --c-grip: #5C6672;
-    --c-grip-hover: #8B95A1;
+    --c-grip-hover: #A9B4C0;
   }
 }
