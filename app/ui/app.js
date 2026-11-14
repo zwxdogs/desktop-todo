@@ -396,15 +396,18 @@ async function loadFile() {
 /* ---------- 渲染清单（todo.pyw:605-707） ---------- */
 
 function boxSvg(checked) {
-  // Tk draw_box(709-720)：选中=accent 方块+白色圆头折线；未选中=1px #C6CCD4 描边
+  // Tk draw_box(709-720)：选中=accent 方块+勾线；未选中=1px 描边（#23 深色下要看得清）
+  //
+  // 颜色不写字面量、也不写 var()：SVG 的 presentation attribute 里 var() 是否解析
+  // 各引擎不一致（w3c/svgwg#1031）。改成 class + 样式表给色，换主题就自动跟着走。
   if (checked) {
     return '<svg viewBox="0 0 18 18" fill="none">' +
-      '<rect x="2" y="2" width="14" height="14" fill="#4A8FE2" stroke="#4A8FE2"/>' +
-      '<polyline points="5,9 8,12 13,5" stroke="#FFFFFF" stroke-width="2" ' +
+      '<rect class="box-fill" x="2" y="2" width="14" height="14"/>' +
+      '<polyline class="box-tick" points="5,9 8,12 13,5" stroke-width="2" ' +
       'stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
   }
   return '<svg viewBox="0 0 18 18" fill="none">' +
-    '<rect x="2" y="2" width="14" height="14" fill="none" stroke="#C6CCD4" stroke-width="1"/></svg>';
+    '<rect class="box-empty" x="2" y="2" width="14" height="14" fill="none" stroke-width="1"/></svg>';
 }
 
 function badgeCheckSvg() {

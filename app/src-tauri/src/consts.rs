@@ -28,5 +28,34 @@ pub const TRAY_SHOW: &str = "tray-show";
 pub const TRAY_DOCK: &str = "tray-dock";
 pub const TRAY_QUIT: &str = "tray-quit";
 
+/// 「主题色」子菜单的三项（#23）。三项共用一个前缀，事件匹配时按前缀分派，
+/// 这样将来加第四档只需加一个常量，不必再改 match 的分支结构。
+pub const TRAY_THEME_PREFIX: &str = "tray-theme-";
+pub const TRAY_THEME_LIGHT: &str = "tray-theme-light";
+pub const TRAY_THEME_DARK: &str = "tray-theme-dark";
+pub const TRAY_THEME_SYSTEM: &str = "tray-theme-system";
+
 /// 长跑日志封顶：启动时超过这个字节数就清空，只留本次运行。
 pub const LOG_MAX_BYTES: u64 = 200_000;
+
+#[cfg(test)]
+mod tray_id_tests {
+    use super::*;
+
+    #[test]
+    fn every_theme_id_carries_the_shared_prefix() {
+        // tray.rs 靠前缀认「这是主题项」，id 少了前缀这条菜单点了就没反应
+        for id in [TRAY_THEME_LIGHT, TRAY_THEME_DARK, TRAY_THEME_SYSTEM] {
+            assert!(id.starts_with(TRAY_THEME_PREFIX), "{} 必须以 {} 开头", id, TRAY_THEME_PREFIX);
+        }
+    }
+
+    #[test]
+    fn theme_ids_do_not_collide_with_the_other_tray_items() {
+        let themes = [TRAY_THEME_LIGHT, TRAY_THEME_DARK, TRAY_THEME_SYSTEM];
+        for other in [TRAY_SHOW, TRAY_DOCK, TRAY_QUIT] {
+            assert!(!themes.contains(&other), "{} 与主题项撞了", other);
+        }
+        assert_eq!(themes.len(), 3, "三项互斥勾选：多一个少一个都不对");
+    }
+}

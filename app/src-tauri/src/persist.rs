@@ -22,6 +22,8 @@ pub fn save(host: &Host) {
         w: Some(frame.w as i64),
         h: Some(frame.h as i64),
         docked: crate::dock::is_docked(host),
+        // 主题色的所有者是 theme 模块：这里只问它「现在选的是哪一档」，不自己记。
+        theme: crate::theme::current(host),
     };
     if let Err(e) = cfg.save(&host.exe_dir()) {
         host.warn_readonly(&e);

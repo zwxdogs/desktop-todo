@@ -15,6 +15,7 @@ use crate::exit;
 use crate::geometry::{self, Rect};
 use crate::panel;
 use crate::state::{AppEnv, Host};
+use crate::theme;
 use crate::tray::{self, TrayState};
 use crate::watchdog::{self, Watchdog};
 use crate::win32;
@@ -148,6 +149,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(env)
         .manage(dock::Mode::default())
+        .manage(theme::Mode::default())
         .manage(TrayState::default())
         .manage(watchdog_state)
         .invoke_handler(tauri::generate_handler![
@@ -240,11 +242,18 @@ pub fn run() {
             // 进入初始两态（ADR 0004）：一次调用把样式、显示、显示后的复落与日志都办完
             dock::enter(&host, &win, initial_dock)?;
 
+            // 主题档位先登记：托盘菜单要按它勾对项（#23）。此时还没落到窗口上，
+            // 因为 panel 还没建——「落到两个窗口」那一步排在 panel::build 之后。
+            theme::register(&host, cfg.theme);
+
             // 托盘：两种模式下都在。固定在桌面时任务栏没有图标，托盘就是唤回主窗口的入口。
             tray::build(&host, initial_dock)?;
 
             // 详情面板：独立 webview 窗口，隐藏待用
             panel::build(&host, udf);
+
+            // 两个窗口都建好了，才把主题落到它们身上（漏了面板就只有主窗换色）
+            theme::settle(&host);
 
             // 看门狗最后起：此时窗口已 show、页面开始加载，计时才有意义
             watchdog::spawn(&host, win.clone());
@@ -311,14 +320,14 @@ mod startup_tests {
     #[test]
     fn stored_geometry_is_restored_exactly() {
         // 验收「文件位置重启后保持」：config 里的 client 坐标原样回来，不偏移不缩放
-        let cfg = Config { file: "a.md".into(), x: Some(300), y: Some(200), w: Some(760), h: Some(640), docked: true };
+        let cfg = Config { file: "a.md".into(), x: Some(300), y: Some(200), w: Some(760), h: Some(640), docked: true, ..Config::default() };
         assert_eq!((frame(&cfg).x, frame(&cfg).y, frame(&cfg).w, frame(&cfg).h), (300, 200, 760, 640));
     }
 
     #[test]
     fn oversized_height_is_capped_then_the_window_is_pulled_up() {
         // 换到更矮的屏幕：高度先按屏高夹住，夹完之后底边仍在屏外，所以 y 也要跟着上移
-        let cfg = Config { file: "a.md".into(), x: Some(300), y: Some(200), w: Some(760), h: Some(1280), docked: true };
+        let cfg = Config { file: "a.md".into(), x: Some(300), y: Some(200), w: Some(760), h: Some(1280), docked: true, ..Config::default() };
         let f = frame(&cfg);
         assert_eq!(f.h, 1080 - 60, "高度按屏高夹住");
         assert_eq!(f.y, 1080 - f.h, "夹完高度后底边不能还在屏外");
@@ -327,7 +336,7 @@ mod startup_tests {
     #[test]
     fn oversized_and_stray_geometry_is_pulled_back() {
         // 旧 config 可能记着更窄的尺寸（低于 min_inner_size）或屏外的坐标
-        let cfg = Config { file: "a.md".into(), x: Some(9999), y: Some(-400), w: Some(120), h: Some(90), docked: false };
+        let cfg = Config { file: "a.md".into(), x: Some(9999), y: Some(-400), w: Some(120), h: Some(90), docked: false, ..Config::default() };
         let f = frame(&cfg);
         assert_eq!((f.w, f.h), (300, 180), "低于下限要撑到 min_inner_size");
         assert_eq!((f.x, f.y), (1620, 0), "屏外坐标夹回屏内");
@@ -338,7 +347,7 @@ mod startup_tests {
         // 本机实测虚拟桌面 = (-1920,0)+3840x1080。旧实现按主屏夹取，会把留在左副屏的窗口
         // 拽回主屏——那正是「屏幕外救援」要保住的东西。现在夹取按虚拟桌面算。
         let vs = Rect::new(-1920, 0, 3840, 1080);
-        let cfg = Config { file: "a.md".into(), x: Some(-1800), y: Some(100), w: Some(760), h: Some(640), docked: true };
+        let cfg = Config { file: "a.md".into(), x: Some(-1800), y: Some(100), w: Some(760), h: Some(640), docked: true, ..Config::default() };
         let f = initial_frame(&cfg, false, None, 1.0, primary(), vs);
         assert_eq!((f.x, f.y), (-1800, 100), "副屏坐标必须原样保留");
     }

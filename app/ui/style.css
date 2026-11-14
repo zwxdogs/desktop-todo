@@ -1,4 +1,4 @@
-﻿/* 桌面待办 0.4.0 —— 0.2.7 视觉规格的 CSS 移植。
+/* 桌面待办 0.4.0 —— 0.2.7 视觉规格的 CSS 移植。
    尺寸一律用裸 px（CSS 逻辑像素）：WebView2 随系统 DPI 自动放大，
    1 CSS px @200% = 2 物理像素，与 Tk 的 N*s 物理像素逐位等价（spike 已实证）。
    颜色常量与 todo.pyw 52-67 行一一对应。
@@ -6,10 +6,88 @@
 
 * { box-sizing: border-box; }
 
-/* 颜色变量。--c-grip 对应 Tk 的 C_GRIP = "#A8B0BC"（todo.pyw:52-67）：
-   0.4.0 的 SVG 把手一直引用它却从未定义，没悬停时描边解析不出来、静默不画（#12）。
-   style.css 里其余颜色仍是逐条字面量，待整体收拢时再说。 */
-:root { --c-grip: #A8B0BC; }
+/* ---------- 配色（#23 起全部变量化） ----------
+   亮色写在 :root，深色只在文件末尾的 @media (prefers-color-scheme: dark) 里覆盖同名变量。
+   这套开关的**唯一来源是 WebView2 的 PreferredColorScheme**：托盘选「暗色」时 Rust 调
+   Window::set_theme(Some(Dark))，最终落到 profile 上，媒体查询跟着变（链路见 theme.rs）。
+   所以这里不需要 data-theme 属性，也不需要 JS 参与换色。
+
+   命名按「这一处颜色是干什么用的」起，不按色值起：--c-row 而不是 --c-fafbfc。
+   同一块色在亮色下是 #FAFBFC、深色下是 #1B1F24，但它在两套里都是「行底色」——
+   按用途命名，深色就不会被写成一堆看不出意图的十六进制。
+
+   color-scheme: light dark 是给 WebView2 自己画的那几件用的（滚动条、输入框、拼写线）：
+   本项目自绘了滚动条、也只有一个隐藏的原生 input，但弹层里的 button 仍是 UA 渲染，
+   声明了它才会跟着一起变深。 */
+:root {
+  color-scheme: light dark;
+
+  /* 面：窗口底、顶栏、行、悬停/按下 */
+  --c-bg: #FAFBFC;
+  --c-hdr: #EDF0F4;
+  --c-hairline: #E1E6ED;      /* 窗口 1px 发丝描边 */
+  --c-rule: #DFE4EA;          /* 内部分界线 */
+  --c-rule-strong: #AFBAC7;   /* 顶栏分组竖线：比发丝线深一档，同色在 #EDF0F4 上几乎看不见 */
+  --c-row: #FAFBFC;
+  --c-row-hover: #F2F5F8;
+  --c-row-active: #E8EEF6;
+  --c-btn-hover: #E3E8EF;
+  --c-btn-active: #D7DEE7;
+  --c-lift: #F2F6FB;          /* 拖起后原地占位块 */
+  --c-dash: #AFC0D6;          /* 占位块虚线 */
+
+  /* 字 */
+  --c-text: #24292F;
+  --c-text-dim: #5A6472;
+  --c-text-muted: #8B929B;
+  --c-text-faint: #B4BCC6;
+  --c-text-done: #9CA3AF;
+  --c-text-note: #57606A;
+  --c-text-header: #3D76B5;   /* 分组标题 */
+  --c-disabled: #C6CCD4;
+
+  /* 主色（强调、勾选、插入线、主要按钮） */
+  --c-accent: #4A8FE2;
+  --c-accent-soft: #DCE9FA;   /* 按钮 lit 态底 */
+  --c-accent-mid: #3F80CE;    /* 主按钮悬停 */
+  --c-accent-deep: #376FB4;   /* 主按钮按下 */
+  --c-accent-text: #FFFFFF;   /* 主色上的字/勾线 */
+  --c-count: #5B91CF;         /* 拖动浮层里的计数 */
+
+  /* 勾选框描边 */
+  --c-box: #C6CCD4;
+
+  /* 浮层 / 菜单 / 弹层的面与影 */
+  --c-surface: #FFFFFF;
+  --c-surface-solid: rgba(255, 255, 255, .94);   /* 拖动浮层底（半透明） */
+  --c-surface-border: #C9D6E8;
+  --c-shadow-1: rgba(15, 23, 42, .16);
+  --c-shadow-2: rgba(15, 23, 42, .14);
+  --c-shadow-3: rgba(15, 23, 42, .22);
+  --c-backdrop: rgba(15, 23, 42, .28);
+
+  /* 自绘滚动条拇指 */
+  --c-thumb: rgba(36, 41, 47, .32);
+  --c-thumb-hover: rgba(36, 41, 47, .5);
+  --c-thumb-drag: rgba(36, 41, 47, .62);
+
+  /* 回执浮层：深底浅字，浮在清单上才看得清 */
+  --c-toast: #24292F;
+  --c-toast-text: #FFFFFF;
+  --c-toast-hover: #3A4149;
+  --c-toast-sub: #C6CCD4;
+
+  /* 提示条四型（#18 / #20 / #21） */
+  --c-info-bg: #FFF8E6;  --c-info-fg: #7A5B00;
+  --c-bad-bg: #FDECEA;   --c-bad-fg: #9B2C2C;
+  --c-bad-hover: #FBDDD9;
+  --c-load-bg: #FFF1DC;  --c-load-fg: #8A4B08;
+  --c-load-hover: #FCE4C4;
+
+  /* 缩放把手描边（Tk C_GRIP） */
+  --c-grip: #A8B0BC;
+  --c-grip-hover: #8B95A1;
+}
 
 html, body {
   height: 100%;
@@ -19,9 +97,9 @@ html, body {
 
 body {
   /* 窗口 1px 发丝描边（Tk shell 外框 C_HAIRLINE）+ 竖向 flex 壳：顶栏固定，清单区吃满余下高度 */
-  border: 1px solid #E1E6ED;
-  background: #FAFBFC;
-  color: #24292F;
+  border: 1px solid var(--c-hairline);
+  background: var(--c-bg);
+  color: var(--c-text);
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   font-size: 10pt;
   display: flex;
@@ -34,8 +112,8 @@ body {
 #hdr {
   flex: 0 0 34px;
   height: 34px;
-  background: #EDF0F4;
-  border-bottom: 1px solid #DFE4EA;   /* 发丝线分界 */
+  background: var(--c-hdr);
+  border-bottom: 1px solid var(--c-rule);   /* 发丝线分界 */
   display: flex;
   align-items: center;
 }
@@ -45,7 +123,7 @@ body {
   min-width: 0;
   margin-left: 10px;
   font-size: 9pt;
-  color: #24292F;
+  color: var(--c-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -58,20 +136,20 @@ body {
   height: 26px;
   border: none;
   background: transparent;
-  color: #5A6472;
+  color: var(--c-text-dim);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   cursor: pointer;
 }
-.hbtn.lit { background: #DCE9FA; color: #4A8FE2; }
-.hbtn:hover { background: #E3E8EF; color: #24292F; }
-.hbtn:active { background: #D7DEE7; color: #24292F; }
+.hbtn.lit { background: var(--c-accent-soft); color: var(--c-accent); }
+.hbtn:hover { background: var(--c-btn-hover); color: var(--c-text); }
+.hbtn:active { background: var(--c-btn-active); color: var(--c-text); }
 /* 删除已完成在没有可删项时置灰：位置不跳、能看见有这个能力，但点不动。
    要压过 .hbtn:hover / :active 的背景，所以选择器带 :disabled。 */
-.hbtn:disabled { color: #C6CCD4; cursor: default; }
-.hbtn:disabled:hover, .hbtn:disabled:active { background: transparent; color: #C6CCD4; }
+.hbtn:disabled { color: var(--c-disabled); cursor: default; }
+.hbtn:disabled:hover, .hbtn:disabled:active { background: transparent; color: var(--c-disabled); }
 #btn-close { margin-right: 6px; }
 
 /* 顶栏五枚图标全是内联 SVG（app.js 的 ICON_* 常量注入，含原来的 ＋ 📌 ↻ ✕）。
@@ -83,13 +161,13 @@ body {
    pointer-events:none 是硬要求：它是 <span>，没有 data-tauri-drag-region，
    不穿透就在按钮之间留一块 9px 死区（既点不到按钮，也拖不动窗口）；
    穿透后命中 #hdr，等同点标题栏空白，可以拖窗口。
-   颜色比顶栏下沿的发丝线（#DFE4EA）深一档：同色在 #EDF0F4 上几乎看不见。 */
+   颜色比顶栏下沿的发丝线（var(--c-rule)）深一档：同色在 var(--c-hdr) 上几乎看不见。 */
 #hdr-sep {
   flex-shrink: 0;
   width: 1px;
   height: 18px;
   margin: 0 4px;
-  background: #AFBAC7;
+  background: var(--c-rule-strong);
   pointer-events: none;
 }
 
@@ -103,22 +181,22 @@ body {
   padding: 6px 12px;
   font-size: 9pt;
   line-height: 16px;
-  border-bottom: 1px solid #DFE4EA;
+  border-bottom: 1px solid var(--c-rule);
   overflow-wrap: anywhere;
 }
 #notice.show { display: block; }
-#notice.kind-info { background: #FFF8E6; color: #7A5B00; }
+#notice.kind-info { background: var(--c-info-bg); color: var(--c-info-fg); }
 /* 只有写盘失败那条与装载失败那条能点：前一条点它 = 重试保存（#18），后一条 = 重试读取（#21） */
-#notice.kind-save { background: #FDECEA; color: #9B2C2C; cursor: pointer; }
-#notice.kind-save:hover { background: #FBDDD9; }
+#notice.kind-save { background: var(--c-bad-bg); color: var(--c-bad-fg); cursor: pointer; }
+#notice.kind-save:hover { background: var(--c-bad-hover); }
 /* 一次性的失败（#20 写备份失败 / 取回失败）：与写盘失败同色要一直挂着，但**不可点**——
    能重试的那件事（再点一次垃圾桶、再按一次 Ctrl+Z）本来就在界面上，伪装成可点是骗人。 */
-#notice.kind-error { background: #FDECEA; color: #9B2C2C; }
+#notice.kind-error { background: var(--c-bad-bg); color: var(--c-bad-fg); }
 /* 装载失败（#21 文件被占用 / 没权限 / 不是 UTF-8）：与写盘失败一样常驻 + **可点**，
    点是重试读取。用另一种底色，是因为处置办法完全不同：那条是「你的改动没写进去」，
    这条是「文件根本没读进来」，用户要先去关掉占用它的程序或另存为 UTF-8。 */
-#notice.kind-load { background: #FFF1DC; color: #8A4B08; cursor: pointer; }
-#notice.kind-load:hover { background: #FCE4C4; }
+#notice.kind-load { background: var(--c-load-bg); color: var(--c-load-fg); cursor: pointer; }
+#notice.kind-load:hover { background: var(--c-load-hover); }
 
 /* ---------- 清单区（0.4.1 起是全窗口唯一的滚动容器） ---------- */
 #list {
@@ -138,10 +216,10 @@ body {
   display: flex;
   align-items: flex-start;
   padding: 2px 0;   /* 行距收紧；首行 22px 行高与勾选框/徽标共用一条中线 */
-  background: #FAFBFC;
+  background: var(--c-row);
 }
-.row:hover { background: #F2F5F8; }
-.row:active { background: #E8EEF6; }
+.row:hover { background: var(--c-row-hover); }
+.row:active { background: var(--c-row-active); }
 
 /* 分组标题行：整行占满（Tk label fill x），双击改名 */
 .row.row-header {
@@ -153,7 +231,7 @@ body {
   display: block;
   font-size: 11pt;
   font-weight: bold;
-  color: #3D76B5;
+  color: var(--c-text-header);
   padding: 8px 62px 4px var(--pad, 0px);
 }
 
@@ -165,6 +243,12 @@ body {
   margin: 2px 8px 2px 0;   /* 行 padding 2 + 2 + 9 = 13，与标签首行中线一致 */
   cursor: pointer;
 }
+/* 勾选框的三块色（app.js / panel.js 只输出 class，不输出色值）：
+   选中=accent 实心方块 + 勾线；未选中=1px 描边。深色下这三处各由变量换一档——
+   未勾的描边从 #C6CCD4 换成更亮的灰，否则深底上整个框会消失（#23 验收项）。 */
+.box-fill { fill: var(--c-accent); stroke: var(--c-accent); }
+.box-tick { stroke: var(--c-accent-text); }
+.box-empty { stroke: var(--c-box); }
 .box svg { width: 100%; height: 100%; display: block; }
 
 .row .label {
@@ -177,12 +261,12 @@ body {
   word-break: break-all;
 }
 .label.done {
-  color: #9CA3AF;
+  color: var(--c-text-done);
   text-decoration: line-through;   /* Tk overstrike 字体 */
 }
-.row-note .label { color: #57606A; }
-.row-note .label.done { color: #9CA3AF; }
-.row-other .label { color: #24292F; }
+.row-note .label { color: var(--c-text-note); }
+.row-note .label.done { color: var(--c-text-done); }
+.row-other .label { color: var(--c-text); }
 
 /* 行内编辑框（Tk ENTRY_STYLE：白底、1px accent 实线边） */
 .row-edit {
@@ -192,9 +276,9 @@ body {
   padding: 1px 4px;
   font-family: inherit;
   font-size: 10pt;
-  color: #24292F;
-  background: #FFFFFF;
-  border: 1px solid #4A8FE2;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-accent);
   outline: none;
   user-select: text;
 }
@@ -202,7 +286,7 @@ body {
   display: block;
   font-size: 11pt;
   font-weight: bold;
-  color: #3D76B5;
+  color: var(--c-text-header);
   margin: 8px 40px 4px var(--pad, 0px);
 }
 
@@ -213,7 +297,7 @@ body {
   align-items: center;
   height: 22px;              /* 与首行文字同高，flex 居中 → 中线 13px */
   margin: 0 12px 0 0;
-  color: #8B929B;
+  color: var(--c-text-muted);
   font-size: 9pt;
   cursor: pointer;
 }
@@ -233,13 +317,13 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #B4BCC6;
+  color: var(--c-text-faint);
   opacity: 0;
   transition: opacity .12s;
   cursor: grab;
 }
 .drag-handle svg { width: 8px; height: 14px; display: block; }
-.drag-handle:hover { color: #6B7480; }
+.drag-handle:hover { color: var(--c-grip-hover); }
 .drag-handle:active { cursor: grabbing; }
 .row:hover .drag-handle { opacity: 1; }
 .row-header .drag-handle { top: 7px; right: 8px; }
@@ -254,13 +338,13 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #B4BCC6;
+  color: var(--c-text-faint);
   opacity: 0;
   transition: opacity .12s;
   cursor: pointer;
 }
 .plus-add svg { width: 12px; height: 12px; display: block; }
-.plus-add:hover { color: #4A8FE2; }
+.plus-add:hover { color: var(--c-accent); }
 .row:hover .plus-add { opacity: 1; }
 .row-header .plus-add { top: 7px; right: 28px; }
 /* 编辑中这一行露着加号/把手只会挡字；拖动中整页的加号也别抢指针 */
@@ -275,10 +359,10 @@ body.dragging .plus-add { display: none; }
 /* 拖起：原位留一块虚线占位（不重排） */
 .row.drag-src {
   opacity: .35;
-  outline: 1px dashed #AFC0D6;
+  outline: 1px dashed var(--c-dash);
   outline-offset: -1px;
   border-radius: 4px;
-  background: #F2F6FB;
+  background: var(--c-lift);
 }
 
 /* 跟随指针的浮层：只显示文字 + 子项计数 */
@@ -291,30 +375,30 @@ body.dragging .plus-add { display: none; }
   align-items: center;
   gap: 8px;
   padding: 3px 10px;
-  background: rgba(255, 255, 255, .94);
-  border: 1px solid #C9D6E8;
+  background: var(--c-surface-solid);
+  border: 1px solid var(--c-surface-border);
   border-radius: 6px;
-  box-shadow: 0 6px 18px rgba(15, 23, 42, .16);
-  color: #24292F;
+  box-shadow: 0 6px 18px var(--c-shadow-1);
+  color: var(--c-text);
   font-size: 10pt;
   line-height: 18px;
   pointer-events: none;
 }
-.drag-ghost-header { color: #3D76B5; font-weight: bold; font-size: 11pt; }
+.drag-ghost-header { color: var(--c-text-header); font-weight: bold; font-size: 11pt; }
 .drag-ghost-text {
   max-width: 260px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.drag-ghost-count { flex-shrink: 0; color: #5B91CF; font-size: 9pt; }
+.drag-ghost-count { flex-shrink: 0; color: var(--c-count); font-size: 9pt; }
 
 /* 插入线：从目标缩进位画到行右缘 */
 .drop-line {
   position: fixed;
   z-index: 190;
   height: 2px;
-  background: #4A8FE2;
+  background: var(--c-accent);
   border-radius: 1px;
   pointer-events: none;
 }
@@ -330,13 +414,13 @@ body.dragging .row:hover .badge { transform: none; }
   height: 22px;
   z-index: 30;
   cursor: nwse-resize;
-  background: #FAFBFC;
+  background: var(--c-bg);
 }
 #grip svg { width: 100%; height: 100%; display: block; }
 /* 描边走 CSS 而不是 SVG presentation attribute：var() 在属性里是否解析 SVGWG 尚未定案
    （w3c/svgwg#1031），落到规则里各引擎一致；颜色见 :root 的 --c-grip。 */
 #grip .grip-line { stroke: var(--c-grip); }
-#grip:hover .grip-line { stroke: #8B95A1; }
+#grip:hover .grip-line { stroke: var(--c-grip-hover); }
 
 /* ---------- 自绘滚动条（0.4.1；DOM/逻辑在 scrollbar.js） ---------- */
 /* 浮层：固定定位，位置由 JS 按滚动容器的矩形算；只有拇指吃鼠标，轨道区点得到下面的内容。
@@ -357,13 +441,13 @@ body.dragging .row:hover .badge { transform: none; }
   left: 0;
   width: 6px;
   border-radius: 3px;
-  background: rgba(36, 41, 47, .32);
+  background: var(--c-thumb);
   pointer-events: none;    /* 隐藏时不能挡住内容 */
   transition: background-color .12s;
 }
 .vscroll.show .vscroll-thumb { pointer-events: auto; }
-.vscroll-thumb:hover { background: rgba(36, 41, 47, .5); }
-.vscroll.dragging .vscroll-thumb { background: rgba(36, 41, 47, .62); }
+.vscroll-thumb:hover { background: var(--c-thumb-hover); }
+.vscroll.dragging .vscroll-thumb { background: var(--c-thumb-drag); }
 @media (prefers-reduced-motion: reduce) {
   .vscroll { transition: none; }
 }
@@ -373,7 +457,7 @@ body.dragging .row:hover .badge { transform: none; }
   margin: 40px auto;
   max-width: 300px;
   padding: 0 16px;
-  color: #8B929B;
+  color: var(--c-text-muted);
   font-size: 10pt;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -387,7 +471,7 @@ body.dragging .row:hover .badge { transform: none; }
   max-width: 260px;
   padding: 0 16px;
   text-align: center;
-  color: #8B929B;
+  color: var(--c-text-muted);
   font-size: 10pt;
   pointer-events: none;
 }
@@ -396,30 +480,30 @@ body.dragging .row:hover .badge { transform: none; }
 #menu {
   position: fixed;
   z-index: 100;
-  background: #FFFFFF;
-  border: 1px solid #DFE4EA;
+  background: var(--c-surface);
+  border: 1px solid var(--c-rule);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  box-shadow: 0 8px 24px var(--c-shadow-2);
   padding: 4px 0;
   min-width: 120px;   /* 空白菜单只剩一项（ADR 0007），160 会空一大块 */
   display: none;
 }
 .menu-item {
   font-size: 9pt;
-  color: #24292F;
+  color: var(--c-text);
   padding: 6px 16px;
   cursor: pointer;
   white-space: nowrap;
 }
-.menu-item:hover { background: #F2F5F8; }
+.menu-item:hover { background: var(--c-row-hover); }
 .menu-item.disabled {
-  color: #B4BCC6;
+  color: var(--c-text-faint);
   cursor: default;
 }
 .menu-item.disabled:hover { background: transparent; }
 .menu-sep {
   height: 1px;
-  background: #DFE4EA;
+  background: var(--c-rule);
   margin: 4px 0;
 }
 
@@ -432,7 +516,7 @@ body.dragging .row:hover .badge { transform: none; }
   position: fixed;
   inset: 0;
   z-index: 300;
-  background: rgba(15, 23, 42, 0.28);
+  background: var(--c-backdrop);
   align-items: center;
   justify-content: center;
   padding: 16px;
@@ -441,22 +525,22 @@ body.dragging .row:hover .badge { transform: none; }
 #conflict-box {
   width: 100%;
   max-width: 320px;
-  background: #FFFFFF;
-  border: 1px solid #DFE4EA;
+  background: var(--c-surface);
+  border: 1px solid var(--c-rule);
   border-radius: 8px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
+  box-shadow: 0 12px 32px var(--c-shadow-3);
   padding: 14px 16px 12px;
 }
 #conflict-title {
   font-size: 10pt;
   font-weight: bold;
-  color: #24292F;
+  color: var(--c-text);
   margin-bottom: 6px;
 }
 #conflict-text {
   font-size: 9pt;
   line-height: 17px;
-  color: #5A6472;
+  color: var(--c-text-dim);
   user-select: text;
 }
 /* 撤回失败时把原因挂在这一行：原文件一个字节都没动，用户此刻还能改选「刷新」 */
@@ -465,8 +549,8 @@ body.dragging .row:hover .badge { transform: none; }
   margin-top: 8px;
   padding: 5px 8px;
   border-radius: 4px;
-  background: #FDECEA;
-  color: #9B2C2C;
+  background: var(--c-bad-bg);
+  color: var(--c-bad-fg);
   font-size: 9pt;
   line-height: 16px;
   overflow-wrap: anywhere;
@@ -482,24 +566,24 @@ body.dragging .row:hover .badge { transform: none; }
 #conflict-btns button {
   min-width: 64px;
   padding: 5px 12px;
-  border: 1px solid #DFE4EA;
+  border: 1px solid var(--c-rule);
   border-radius: 5px;
-  background: #FFFFFF;
-  color: #24292F;
+  background: var(--c-surface);
+  color: var(--c-text);
   font-family: inherit;
   font-size: 9pt;
   cursor: pointer;
 }
-#conflict-btns button:hover { background: #F2F5F8; }
-#conflict-btns button:active { background: #E8EEF6; }
+#conflict-btns button:hover { background: var(--c-row-hover); }
+#conflict-btns button:active { background: var(--c-row-active); }
 /* 「撤回」是保住用户字的那个选择，按主要动作画 */
 #conflict-revert {
-  background: #4A8FE2;
-  border-color: #4A8FE2;
-  color: #FFFFFF;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: var(--c-accent-text);
 }
-#conflict-revert:hover { background: #3F80CE; border-color: #3F80CE; }
-#conflict-revert:active { background: #376FB4; border-color: #376FB4; }
+#conflict-revert:hover { background: var(--c-accent-mid); border-color: var(--c-accent-mid); }
+#conflict-revert:active { background: var(--c-accent-deep); border-color: var(--c-accent-deep); }
 
 /* ---------- 详情面板 ---------- */
 #panel-body {
@@ -520,7 +604,7 @@ body.dragging .row:hover .badge { transform: none; }
   scrollbar-width: none;
 }
 .pane-scroll::-webkit-scrollbar { display: none; }
-.pane-sep { background: #DFE4EA; }
+.pane-sep { background: var(--c-rule); }
 .pane-bar {
   flex-shrink: 0;
   text-align: left;
@@ -528,12 +612,12 @@ body.dragging .row:hover .badge { transform: none; }
 .pane-add {
   display: inline-block;
   font-size: 9pt;
-  color: #4A8FE2;
+  color: var(--c-accent);
   padding: 8px 16px;
   cursor: pointer;
 }
-.pane-add:hover { background: #F2F5F8; }
-.pane-add:active { background: #E8EEF6; }
+.pane-add:hover { background: var(--c-row-hover); }
+.pane-add:active { background: var(--c-row-active); }
 
 /* 面板标题行 */
 #panel-title {
@@ -543,7 +627,7 @@ body.dragging .row:hover .badge { transform: none; }
   margin-right: 4px;
   font-size: 11pt;
   font-weight: bold;
-  color: #24292F;
+  color: var(--c-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -557,9 +641,9 @@ body.dragging .row:hover .badge { transform: none; }
   font-family: inherit;
   font-size: 11pt;
   font-weight: bold;
-  color: #24292F;
-  background: #FFFFFF;
-  border: 1px solid #4A8FE2;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-accent);
   outline: none;
   user-select: text;
 }
@@ -567,12 +651,12 @@ body.dragging .row:hover .badge { transform: none; }
   flex-shrink: 0;
   margin-right: 6px;
   font-size: 9pt;
-  color: #5A6472;
+  color: var(--c-text-dim);
   cursor: pointer;
   padding: 7px;
 }
-#panel-x:hover { background: #E3E8EF; color: #24292F; }
-#panel-x:active { background: #D7DEE7; color: #24292F; }
+#panel-x:hover { background: var(--c-btn-hover); color: var(--c-text); }
+#panel-x:active { background: var(--c-btn-active); color: var(--c-text); }
 
 /* 面板行全部顶格 pad=12（Tk p_build_row） */
 #panel-body .row { --pad: 12px; }
@@ -588,8 +672,8 @@ body.dragging .row:hover .badge { transform: none; }
   max-width: calc(100% - 24px);
   padding: 6px 10px;
   border-radius: 6px;
-  background: #24292F;          /* 与标题文字同色，浮在灰底清单上才看得清 */
-  color: #FFFFFF;
+  background: var(--c-toast);          /* 与清单反着走：亮色下深底浅字，深色下浅底深字 */
+  color: var(--c-toast-text);
   font-size: 9pt;
   line-height: 16px;
   text-align: center;
@@ -600,5 +684,87 @@ body.dragging .row:hover .badge { transform: none; }
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.clickable { pointer-events: auto; cursor: pointer; }
-#toast.clickable:hover { background: #3A4149; }
-#toast .toast-sub { color: #C6CCD4; font-size: 8.5pt; }
+#toast.clickable:hover { background: var(--c-toast-hover); }
+#toast .toast-sub { color: var(--c-toast-sub); font-size: 8.5pt; }
+
+/* ---------- 深色（#23） ----------
+   触发条件只有媒体查询：托盘选「暗色 / 跟随系统」时 Rust 把 WebView2 的
+   PreferredColorScheme 写成 DARK / AUTO，这里就跟着生效（链路见 src-tauri/src/theme.rs）。
+
+   几条规矩，深色不是把亮色的值反过来：
+   - 面用三层灰阶拉开层次（窗口底 < 行 < 浮层），不是全黑；全黑配浅字在 LCD 上会发光溢出。
+   - 字不取纯白：正文 #E6EDF3 一档、次要 #A9B4C0 一档、更弱 #7D8894 一档，
+     与亮色那套「正文 / 次要 / 更弱」一一对应，字阶关系不因为换色而变。
+   - 强调色提亮一档（#4A8FE2 → #6AA9F0）：同一个蓝在深底上会显闷，对比度也掉。
+   - 提示条的四种底色在深色下不能直接照搬浅色：浅底深字翻成深底浅字，
+     每种各给自己的底与字，否则「写盘失败」和「装载失败」在深色下会糊成一片。
+   - 阴影加深加重：深底上的阴影本来就不明显，浅影等于没有。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* 面 */
+    --c-bg: #1B1F24;
+    --c-hdr: #22272E;
+    --c-hairline: #0F1216;
+    --c-rule: #30363D;
+    --c-rule-strong: #4A5460;
+    --c-row: #1B1F24;
+    --c-row-hover: #242A31;
+    --c-row-active: #2B323A;
+    --c-btn-hover: #2C333B;
+    --c-btn-active: #343C45;
+    --c-lift: #20262C;
+    --c-dash: #45505C;
+
+    /* 字 */
+    --c-text: #E6EDF3;
+    --c-text-dim: #A9B4C0;
+    --c-text-muted: #7D8894;
+    --c-text-faint: #5C6672;
+    --c-text-done: #6E7884;
+    --c-text-note: #A9B4C0;
+    --c-text-header: #79B8FF;
+    --c-disabled: #4A5460;
+
+    /* 主色：深底上提亮一档 */
+    --c-accent: #6AA9F0;
+    --c-accent-soft: #24405F;
+    --c-accent-mid: #86BAF5;
+    --c-accent-deep: #A6CBF8;
+    --c-accent-text: #0F1216;   /* 浅蓝底上用深字，不用白字 */
+    --c-count: #86BAF5;
+
+    /* 勾选框描边：深色下要能看见未勾的那个方框 */
+    --c-box: #6E7884;
+
+    /* 浮层 / 菜单 / 弹层 */
+    --c-surface: #22272E;
+    --c-surface-solid: rgba(34, 39, 46, .96);
+    --c-surface-border: #3D4650;
+    --c-shadow-1: rgba(0, 0, 0, .5);
+    --c-shadow-2: rgba(0, 0, 0, .5);
+    --c-shadow-3: rgba(0, 0, 0, .6);
+    --c-backdrop: rgba(0, 0, 0, .55);
+
+    /* 自绘滚动条拇指：亮色是深拇指，深色用浅拇指 */
+    --c-thumb: rgba(230, 237, 243, .28);
+    --c-thumb-hover: rgba(230, 237, 243, .46);
+    --c-thumb-drag: rgba(230, 237, 243, .6);
+
+    /* 回执浮层：深底上改成浅底深字，才仍然「浮在清单上」 */
+    --c-toast: #E6EDF3;
+    --c-toast-text: #16191D;
+    --c-toast-hover: #C9D3DD;
+    --c-toast-sub: #4A5460;
+
+    /* 提示条四型：深底浅字，四型各留自己的色相 */
+    --c-info-bg: #3A2F14;  --c-info-fg: #F0D48A;
+    --c-bad-bg: #41201F;   --c-bad-fg: #F2A8A2;
+    --c-bad-hover: #4E2725;
+    --c-load-bg: #3A2A12;  --c-load-fg: #F0B67A;
+    --c-load-hover: #493418;
+
+    /* 缩放把手：深底上原来的 #A8B0BC 太亮，压一档 */
+    --c-grip: #5C6672;
+    --c-grip-hover: #8B95A1;
+  }
+}

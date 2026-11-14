@@ -58,14 +58,15 @@ function setEditing(on) { proto.send('editing', { on }); }
 /* ---------- 行构建（Tk p_build_row 1263-1303：全部顶格 pad=12） ---------- */
 
 function boxSvg(checked) {
+  // 颜色走 class + 样式表（不用 SVG presentation attribute 里的 var()，见 app.js 的 boxSvg）
   if (checked) {
     return '<svg viewBox="0 0 18 18" fill="none">' +
-      '<rect x="2" y="2" width="14" height="14" fill="#4A8FE2" stroke="#4A8FE2"/>' +
-      '<polyline points="5,9 8,12 13,5" stroke="#FFFFFF" stroke-width="2" ' +
+      '<rect class="box-fill" x="2" y="2" width="14" height="14"/>' +
+      '<polyline class="box-tick" points="5,9 8,12 13,5" stroke-width="2" ' +
       'stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>';
   }
   return '<svg viewBox="0 0 18 18" fill="none">' +
-    '<rect x="2" y="2" width="14" height="14" fill="none" stroke="#C6CCD4" stroke-width="1"/></svg>';
+    '<rect class="box-empty" x="2" y="2" width="14" height="14" fill="none" stroke-width="1"/></svg>';
 }
 
 /* 删除/插行之前先把未定稿的内联编辑落回去（Tk delete_line 前的 _commit_edits）。

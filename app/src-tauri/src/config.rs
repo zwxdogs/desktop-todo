@@ -17,6 +17,42 @@ fn bool_or_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
+/// 主题三态：亮色 / 暗色 / 跟随系统（#23）。默认跟随系统。
+///
+/// 序列化成小写字符串（`"system"` / `"light"` / `"dark"`），因为 config.json 是用户可能
+/// 手改的文件，可读的字符串比数字靠谱。解析用自定义反序列化器而不是 `#[serde(rename_all)]`
+/// + `#[serde(other)]`：后者会把任何不认识的写法（`"System"`、`"auto"`、缺字段）都判成
+/// 同一种结果，而这里要的是「不认识就当没写」——退默认值，不整份判坏。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// 不认识的值 / null / 缺字段一律落 `system`：主题写错不该让人打不开待办。
+fn theme_or_system<'de, D: Deserializer<'de>>(d: D) -> Result<ThemePref, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(match raw.as_deref() {
+        Some("light") => ThemePref::Light,
+        Some("dark") => ThemePref::Dark,
+        _ => ThemePref::System,
+    })
+}
+
+impl ThemePref {
+    /// 落到窗口的 `set_theme` 语义：`None` = 跟随系统。
+    pub fn to_window_theme(self) -> Option<tauri::Theme> {
+        match self {
+            ThemePref::System => None,
+            ThemePref::Light => Some(tauri::Theme::Light),
+            ThemePref::Dark => Some(tauri::Theme::Dark),
+        }
+    }
+}
+
 /// config.json 的唯一定义。
 ///
 /// 缺字段落默认值：`file` 空串（启动时解析成 exe 旁的 `待办.md`）、几何 `null`、
@@ -34,6 +70,9 @@ pub struct Config {
     /// 固定在桌面（true）/ 普通窗口（false）。
     #[serde(deserialize_with = "bool_or_false")]
     pub docked: bool,
+    /// 主题色（#23）：亮 / 暗 / 跟随系统。缺字段或写错都落「跟随系统」。
+    #[serde(deserialize_with = "theme_or_system")]
+    pub theme: ThemePref,
 }
 
 impl Config {
@@ -98,6 +137,7 @@ mod config_tests {
             w: Some(760),
             h: Some(1280),
             docked: true,
+            theme: ThemePref::Dark,
         }
     }
 
@@ -114,6 +154,49 @@ mod config_tests {
         assert_eq!(cfg.file, "E:/旧/待办.md");
         assert_eq!((cfg.x, cfg.y, cfg.w, cfg.h), (None, None, None, None));
         assert!(!cfg.docked, "缺 docked = 普通窗口（ADR 0004 的默认）");
+        assert_eq!(cfg.theme, ThemePref::System, "缺 theme = 跟随系统（#23）");
+    }
+
+    #[test]
+    fn every_theme_value_round_trips_as_a_lowercase_word() {
+        // 验收「选暗色后重启仍是暗色」的最小模型：三态各自写出去再读回来，值不变。
+        // 顺带钉住字节形态：config.json 是用户可能手改的文件，写出去得是人能读的字。
+        for (pref, written) in
+            [(ThemePref::System, "\"system\""), (ThemePref::Light, "\"light\""), (ThemePref::Dark, "\"dark\"")]
+        {
+            let cfg = Config { theme: pref, ..Config::default() };
+            let text = serde_json::to_string_pretty(&cfg).unwrap();
+            assert!(text.contains(&format!("\"theme\": {}", written)), "{} 应写成 {}", pref_str(pref), written);
+            assert_eq!(Config::from_text(&text).theme, pref, "{} 必须原样读回", pref_str(pref));
+        }
+    }
+
+    fn pref_str(p: ThemePref) -> &'static str {
+        match p {
+            ThemePref::System => "system",
+            ThemePref::Light => "light",
+            ThemePref::Dark => "dark",
+        }
+    }
+
+    #[test]
+    fn a_theme_written_as_null_or_nonsense_falls_back_to_system() {
+        // 手改成 null / 大写 / 别的词：落跟随系统，但**别的字段照常读出来**（不整份判坏）
+        for bad in ["null", "\"System\"", "\"auto\"", "\"DARK\"", "\"\""] {
+            let text = format!("{{\"file\": \"a.md\", \"x\": 7, \"theme\": {}}}", bad);
+            let cfg = Config::from_text(&text);
+            assert_eq!(cfg.theme, ThemePref::System, "theme={} 应落跟随系统", bad);
+            assert_eq!(cfg.x, Some(7), "theme={} 时别的字段不该被牵连", bad);
+        }
+    }
+
+    #[test]
+    fn theme_maps_to_the_three_window_states() {
+        // 「跟随系统」落到 set_theme 的语义是 None（不是 Some(Light)）——这是三态的接缝，
+        // 写错就变成「选了跟随系统却钉死在亮色」。
+        assert_eq!(ThemePref::System.to_window_theme(), None, "跟随系统 = 不强制");
+        assert_eq!(ThemePref::Light.to_window_theme(), Some(tauri::Theme::Light));
+        assert_eq!(ThemePref::Dark.to_window_theme(), Some(tauri::Theme::Dark));
     }
 
     /// 测试用的临时目录：放在 target/ 下（cargo 一定可写，%TEMP% 在受限账户下可能被拒）。

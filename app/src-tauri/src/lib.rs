@@ -16,6 +16,7 @@
 //   persist      config 落盘
 //   dock         两态（固定桌面 / 普通窗口）与一次贴桌面
 //   panel        详情面板窗口
+//   theme        主题色三态（亮 / 暗 / 跟随系统）与落到两个窗口
 //   tray         托盘图标、菜单、勾选态
 //   watchdog     界面存活看门狗
 //   exit         退出
@@ -36,6 +37,7 @@ pub mod maintenance;
 pub mod panel;
 pub mod persist;
 pub mod state;
+pub mod theme;
 pub mod tray;
 pub mod watchdog;
 pub mod win32;
