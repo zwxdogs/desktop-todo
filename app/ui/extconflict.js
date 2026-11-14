@@ -1,4 +1,4 @@
-﻿// extconflict.js — 外部改动撞上未落盘本地改动时的整个判定（#22）。
+// extconflict.js — 外部改动撞上未落盘本地改动时的整个判定（#22）。
 //
 // 每秒一轮的 poll 按 `mtime:size` 发现文件变了。以前它无条件 `loadFile()`，而 `loadFile`
 // 开头就是 `list.cancelSave()`：250ms 写盘合并窗口里还没落盘的那几笔直接丢，撤销栈也被
@@ -33,7 +33,7 @@ export function hasUnflushed(unflushed = {}) {
   return !!(u.pending || u.editing || u.panelEditing);
 }
 
-/** 冲突弹层是不是开着。`conflictPlan` 的 'hold' 就是这一条，调用方读它比造一个假 hasLocal 清楚。 */
+/** 外部改动弹层是不是开着。`conflictPlan` 的 'hold' 就是这一条，调用方读它比造一个假 hasLocal 清楚。 */
 export function isConflictOpen(state) {
   return !!(state && state.kind === 'conflict');
 }
@@ -84,16 +84,44 @@ export function nextConflict(state, ev) {
  * 弹层里给用户看的那句话。`name` 是当前清单的文件名。
  *
  * 措辞要说清三件事：外部改过了、此刻有两个选择、撤回会先留一份备份在哪儿。
- * 「-out-bak」这个名字写在这里（而不是拼进文件名）：用户要能在资源管理器里认出它。
+ * 备份**具体叫什么**由 `outBackupName` 算出来（与 Rust 真写的那个一致）：说「存成
+ * 待办-out-bak.md」比说「存成同目录的 -out-bak 备份」更好认；拿不到文件名时退回
+ * 不带名字的说法。
  */
 export function conflictText(name) {
   const who = name ? `「${name}」` : '这个清单';
+  const bak = name ? outBackupName(name) : '';
+  const where = bak
+    ? `先把外部那份存成同目录的 ${bak}，`
+    : '先把外部那份存成同目录的 -out-bak 备份，';
   return `文件被其他程序改过了：${who}。`
     + '选「刷新」用磁盘上的版本，这次改动会丢；'
-    + '选「撤回」先把外部那份存成同目录的 -out-bak 备份，再用你现在看到的版本整份写回。';
+    + `选「撤回」${where}再用你现在看到的版本整份写回。`;
 }
 
 /** 撤回没成功时挂在弹层上的那句话（原文件一个字节没动，用户还能改选「刷新」）。 */
 export function conflictFailText(reason) {
   return `没能存下外部那份备份，原文件没有改动：${reason || '未知原因'}`;
+}
+
+/**
+ * 「撤回」会写出的那个备份叫什么——**只用来跟用户说话，不参与写盘**。
+ *
+ * 真正写哪个路径由 Rust 从源文件派生（`files::out_backup_path`，票 #12：前端不拼路径），
+ * 这里存在的理由是验收第 9 条要的「备份文件名」得在纯函数层测得到，而且弹层文案里
+ * 出现的名字必须和 Rust 真写出来的那个一致。两边规则的唯一权威是 Rust 那一份，
+ * 这个函数是它的**只读镜像**，由 `outBackupNameMatchesRust` 的约定守住：
+ * 取最后一个 `.` 之前为主名，扩展名保留，主名后加 `-out-bak`；没有扩展名就直接追加。
+ *
+ * 拿不到文件名（空串、只有目录）时返回空串，调用方退回不带文件名的说法。
+ */
+export function outBackupName(file) {
+  if (typeof file !== 'string' || !file) return '';
+  const slash = Math.max(file.lastIndexOf('\\'), file.lastIndexOf('/'));
+  const name = slash >= 0 ? file.slice(slash + 1) : file;
+  if (!name) return '';
+  const dot = name.lastIndexOf('.');
+  // 前导点（`.md`）不算扩展名，与 Rust 的 Path::file_stem 一致
+  if (dot > 0) return `${name.slice(0, dot)}-out-bak${name.slice(dot)}`;
+  return `${name}-out-bak`;
 }

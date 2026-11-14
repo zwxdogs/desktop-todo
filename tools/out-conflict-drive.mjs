@@ -164,7 +164,7 @@ check('撤回：撤的是整份覆盖，没有掺进外部内容',
   !afterRevert.includes('外部连写'), JSON.stringify(afterRevert.slice(0, 90)));
 check('撤回：弹层关闭', !(await dialog()).open);
 const notice = await main.eval(`(() => { const n = document.querySelector('#notice'); return { show: n.classList.contains('show'), text: n.textContent }; })()`);
-check('撤回：顶部给出回执', notice.show && notice.text.includes('-out-bak'), JSON.stringify(notice));
+check('撤回：顶部提示条说明了备份位置', notice.show && notice.text.includes('-out-bak'), JSON.stringify(notice));
 
 /* ---------- 场景 5：撤回之后不会被自己的写入再触发一轮 ---------- */
 await sleep(2400);

@@ -85,6 +85,12 @@ export function createList(opts = {}) {
     held = false;
   }
 
+  /* 按住期间到点的写盘要丢掉，但 `held` 只拦得住**还没开始**的写。
+     已经越过下面那道检查、正卡在 `hooks.write` 里的那一笔拦不住（JS 没有取消 Promise
+     的办法）。那是个亚毫秒级的窗口：`doSave` 到 `hooks.write` 之间没有 await，而 Rust
+     写一份清单是毫秒量级。它的后果也只是「撤回留档的是我们刚写下去的那份」——用户的字
+     在盘上，丢的是外部那一版，而这在按住机制之前本来就会丢。不为此再加一层快照
+     （每次外部改动多读一遍盘、还要把原始字节穿过 IPC），记为已知残留。 */
   async function doSave() {
     saveTimer = null;
     if (!hooks.write) return;

@@ -101,8 +101,9 @@ pub fn write(path: &Path, content: &str, has_bom: bool) -> Result<(), String> {
 
 /// 原子写一个字节序列：先写同目录的 `.todo_tmp`，再 rename 盖上去。
 ///
-/// `write` 与 `write_out_backup` 共用这一步：两条写路径的「写到一半崩掉不会留下半份」
-/// 是同一个保证，不该各写一遍。失败时把 tmp 收掉——留着它只会在用户目录里积垃圾。
+/// `write`（主文件）与 `revert_external`（外部改动留档）共用这一步：两条写路径的
+/// 「写到一半崩掉不会留下半份」是同一个保证，不该各写一遍。失败时把 tmp 收掉——
+/// 留着它只会在用户目录里积垃圾。
 fn write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
     // todo.pyw 用 path + ".todo_tmp"；with_extension 会替换已有扩展名，手动拼接
     let tmp = PathBuf::from(format!("{}.todo_tmp", path.display()));

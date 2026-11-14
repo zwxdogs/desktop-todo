@@ -1,4 +1,4 @@
-﻿// extconflict.test.js — 外部改动撞上未落盘本地改动时的判定（#22）。
+// extconflict.test.js — 外部改动撞上未落盘本地改动时的判定（#22）。
 //
 // 钉的是三条最容易写反的政策，它们直接决定用户的字会不会无声消失：
 //   ① 有未落盘改动才弹，没有就静默重载（同步盘每分钟写一次，每次都弹就是弹窗地狱）。
@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   hasUnflushed, conflictPlan, nextConflict, isConflictOpen, conflictText, conflictFailText,
+  outBackupName,
 } from './extconflict.js';
 
 /* ---------- ① 有没有未落盘的本地改动 ---------- */
@@ -118,7 +119,15 @@ test('弹层文案：带文件名，说清两个选择与 -out-bak', () => {
   assert.match(t, /刷新/);
   assert.match(t, /撤回/);
   assert.match(t, /-out-bak/, '要让用户在资源管理器里认得出那份备份');
-  assert.match(t, /-out-bak 备份/, '说明它是备份，不是一个看不出用途的文件');
+  assert.match(t, /检查清单-out-bak\.md/, '说具体名字比只说后缀好认');
+});
+
+test('弹层文案：说出的备份名必须和 Rust 真写的那个一致', () => {
+  // 两边规则的权威在 Rust（files::out_backup_path）；这里是它的只读镜像，
+  // 文案里出现了名字就必须是那个名字，否则用户去资源管理器里会找不到。
+  const t = conflictText('待办.md');
+  assert.match(t, /待办-out-bak\.md/);
+  assert.doesNotMatch(t, /待办-bak\.md/, '别把 #20 的删除备份名混进来');
 });
 
 test('弹层文案：拿不到文件名时句子仍然通顺（不留空括号）', () => {
@@ -136,4 +145,48 @@ test('失败文案：先说原文件没动，再给原因', () => {
 test('失败文案：没有原因也说得出一句完整的话', () => {
   assert.match(conflictFailText(''), /未知原因/);
   assert.match(conflictFailText(undefined), /未知原因/);
+});
+
+/* ---------- ⑥ 备份文件名：纯函数层也要有（验收第 9 条） ----------
+   真写哪个路径由 Rust 的 files::out_backup_path 决定（前端不拼路径，#12）；
+   这里钉的是它的只读镜像，两边必须给出同一个名字，否则弹层里说的名字是假的。 */
+
+test('备份文件名：主名后加 -out-bak，扩展名保留', () => {
+  assert.equal(outBackupName('E:\\项目\\待办.md'), '待办-out-bak.md');
+  assert.equal(outBackupName('E:\\项目\\检查清单.md'), '检查清单-out-bak.md');
+  assert.equal(outBackupName('/home/u/待办.md'), '待办-out-bak.md');
+  assert.equal(outBackupName('待办.md'), '待办-out-bak.md', '没有目录时也要工作');
+});
+
+test('备份文件名：扩展名原样保留（大小写不动）', () => {
+  assert.equal(outBackupName('E:\\项目\\清单.MD'), '清单-out-bak.MD');
+});
+
+test('备份文件名：主名按最后一个点切', () => {
+  assert.equal(outBackupName('E:\\项目\\a.b.md'), 'a.b-out-bak.md');
+});
+
+test('备份文件名：没有扩展名就直接追加', () => {
+  assert.equal(outBackupName('E:\\项目\\待办'), '待办-out-bak');
+});
+
+test('备份文件名：前导点不算扩展名（与 Rust 的 file_stem 一致）', () => {
+  assert.equal(outBackupName('E:\\项目\\.md'), '.md-out-bak');
+});
+
+test('备份文件名：源文件自己就叫 -out-bak 时再追加一次，永不等同源文件', () => {
+  // 与 #20 的 -bak 同一条规则：追加而不是替换
+  assert.equal(outBackupName('E:\\项目\\待办-out-bak.md'), '待办-out-bak-out-bak.md');
+  assert.notEqual(outBackupName('待办.md'), '待办.md');
+  assert.notEqual(outBackupName('待办'), '待办');
+  assert.notEqual(outBackupName('.md'), '.md');
+  assert.notEqual(outBackupName('待办-out-bak.md'), '待办-out-bak.md');
+  assert.notEqual(outBackupName('E:\\项目\\待办.md'), 'E:\\项目\\待办.md');
+});
+
+test('备份文件名：拿不到文件名时返回空串，调用方退回不带名字的说法', () => {
+  assert.equal(outBackupName(''), '');
+  assert.equal(outBackupName(undefined), '');
+  assert.equal(outBackupName(null), '');
+  assert.equal(outBackupName('E:\\项目\\'), '', '只有目录时没有文件名可拼');
 });
