@@ -683,10 +683,12 @@ function closePanel() {
    一律走一趟落定，不看 S.panelEditing：那条通知只是「面板里有没有字」的提示，
    漏收一条（面板刚起编辑、通知还在路上）就等于丢字。落定本身很便宜——
    面板没有未定稿就回一条空回执，一次往返而已，不值得拿正确性换。
+   回执没来（面板页卡死）只记一条告警、照常收：这时把窗口留着不放更糟，
+   而面板手里那份编辑它已经交不出来了。
    正在编辑的那行被删掉时走裸 closePanel —— 那时用户要的就是丢掉，与 Tk 同款。 */
 async function closePanelSaving() {
   if (!S.panelOpen) return;
-  await flushPanel();
+  if (!(await flushPanel())) log('panel close: 落定回执没来，面板里可能有字没落盘');
   closePanel();
 }
 
@@ -803,10 +805,18 @@ function pAddBelow(kind, j) {
    「当前打开哪个文件」的唯一所有者在 Rust，这里不自己拼路径、也不猜标题；
    只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。
 
-   顺序要紧：**先落定、再采纳新身份**。落定会走 list.setText，而它排的写盘用的是
-   S.file——身份先换掉的话，面板里那份没落定的字会被写到新文件上去。 */
+   顺序与「谁来写盘」都要对，缺一个都会丢字：
+   1. 先落定 —— 面板里没落定的编辑变成 list.setText，排进 250ms 写盘窗口。
+   2. **马上把这一笔写下去** —— 紧接着的 loadFile 第一句就是 list.cancelSave()，
+      否则刚排上的写盘会被它取消掉，面板里那份字只是进了内存、随即被新文件覆盖。
+      身份此刻还是旧的，所以写到的是旧文件（正确目标）。
+   3. 换身份、重新装载。 */
 async function switchToFile(identity) {
-  await closePanelSaving();   // 面板里改了一半的先落回旧文件
+  await closePanelSaving();          // 面板里改了一半的先落回清单（排写盘）
+  if (list.pending()) {              // 排上了就立刻落盘，别让 loadFile 把它取消掉
+    await writeText(list.text());
+    list.cancelSave();
+  }
   adoptFile(identity);
   S.missingShown = false;
   await loadFile();

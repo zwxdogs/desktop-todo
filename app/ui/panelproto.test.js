@@ -36,6 +36,31 @@ function wire() {
 
 const noop = () => {};
 
+test("处理函数必须覆盖本端收的每一条消息（打错一个名字就会被点名）", async () => {
+  // 窗口那边是一张 { 名字: 函数 } 的表；打错一个键以前只会在运行到那条消息时
+  // 记一行日志，静默失效。这里把「覆盖」本身钉成断言。
+  const { main, panel, logs } = wire();
+  // 主窗口收：全部 op + editing + hello + receipt
+  await main.start(Object.fromEntries(
+    TABLE.filter((r) => r.dir === TO_MAIN || r.dir === BOTH).map((r) => [r.name, noop]),
+  ));
+  assert.doesNotMatch(logs.main.join("\n"), /没有处理函数/, "覆盖齐了就不该点名");
+  // 面板收：data / flush / hide + hello
+  await panel.start(Object.fromEntries(
+    TABLE.filter((r) => r.dir === TO_PANEL || r.dir === BOTH).map((r) => [r.name, noop]),
+  ));
+  assert.doesNotMatch(logs.panel.join("\n"), /没有处理函数/);
+
+  // 少一个就点名（这里故意漏掉 toggle）
+  const { main: m2, logs: l2 } = wire();
+  const missing = Object.fromEntries(
+    TABLE.filter((r) => r.dir === TO_MAIN || r.dir === BOTH).map((r) => [r.name, noop]),
+  );
+  delete missing.toggle;
+  await m2.start(missing);
+  assert.match(l2.main.join("\n"), /没有处理函数.*toggle/);
+});
+
 test("协议表：消息名唯一，方向只有三个，操作与命令都不缺", () => {
   const names = TABLE.map((m) => m.name);
   assert.equal(new Set(names).size, names.length, "消息名不许重");
