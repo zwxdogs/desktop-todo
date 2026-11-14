@@ -2,10 +2,12 @@
    与 todo.pyw (0.2.7) 的 p_* 系列函数对应：
    - 数据由主窗口经协议推来（Tk render_panel 的远端等价物）
    - 操作经协议回传主窗口应用（Tk 直接改 self.lines 的远端等价物）
-   - 行内编辑/标题改名在本地进行，提交时回传（Tk p_edit/p_rename 的 commit/cancel）
+   - 内联编辑/标题改名在本地进行，落定时回传（Tk p_edit/p_rename 的 commit/cancel）
    0.4.0 新增：两栏各自的拖动排序（跨栏不合法；真搬行仍由主窗口执行）。
    #16 起跨窗消息全走 panelproto.js：消息名、方向、字段只在那张表里定义，
-   这里只装三个处理函数（data / flush / hide）、按名字发操作。 */
+   这里只装三个处理函数（data / flush / hide/hello）、按名字发操作。 */
+
+'use strict';
 
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
@@ -333,9 +335,10 @@ document.addEventListener('mousedown', (e) => {
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 /* 收起面板：先把未定稿的编辑交出去（Tk close_panel 开头就是 _commit_edits），
-   再请主窗口关。编辑在收起之前已经落进清单，所以关面板不丢字。 */
+   再请主窗口关。行内编辑与标题改名都要交，否则点 ✕ 那一刻改了一半的标题会没。 */
 function requestClose() {
-  commitPending();
+  const ops = pendingOps();      // 行内编辑与改名都在里面，且已清掉本地编辑态
+  for (const op of ops) proto.sendOp(op);
   req('close', {});
 }
 $('panel-x').addEventListener('click', requestClose);

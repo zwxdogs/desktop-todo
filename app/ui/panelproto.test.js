@@ -128,6 +128,75 @@ test("announce 可以再喊一次 hello（面板页重载后主窗口重连）",
   outbox.main.length = 0;
   main.announce();
   assert.deepEqual(outbox.main.map((p) => p.type), ["hello"]);
+  assert.ok(outbox.main[0].epoch, "hello 带本次加载的身份");
+});
+
+test("面板页重载：新对端喊 hello，主窗口回它一声并重推内容", async () => {
+  const { main, deliver, receivers, outbox } = wire();
+  let hellos = 0;
+  await main.start({ hello: () => { hellos += 1; } });
+  outbox.main.length = 0;
+
+  // 面板页重载 = 一个全新的协议端（新 epoch）从零开始握手
+  const panelIn = [];
+  const fresh = createProtocol({
+    side: PANEL,
+    link: { listen: async (fn) => { panelIn.push(fn); }, send: (p) => { outbox.panel.push(p); } },
+    log: () => {},
+  });
+  await fresh.start({});
+  // 新面板的 hello 到主窗口：主窗口必须（a）回一声（否则新面板永远不知道自己能发，
+  // 它发出的每条消息都会卡在队列里），（b）把 hello 投给处理函数（好重推内容）。
+  for (const p of outbox.panel.splice(0)) receivers[MAIN](p);
+  assert.equal(hellos, 1, "重载后的 hello 要投给处理函数");
+  const reply = outbox.main.filter((p) => p.type === "hello");
+  assert.equal(reply.length, 1, "主窗口要回一声 hello");
+  assert.ok(reply[0].epoch, "回的那一声带主窗口自己的身份");
+
+  // 那一声回执真的到新面板，它就能发了
+  for (const p of outbox.main.splice(0)) panelIn[0](p);
+  assert.equal(fresh.peerReady(), true, "新面板收到回执后就能发了");
+});
+
+test("面板页重载后发得出的消息不再卡在队列里", async () => {
+  const { main, receivers, outbox } = wire();
+  const got = [];
+  await main.start({ toggle: (m) => got.push(m) });
+  outbox.main.length = 0;
+
+  // 新面板从零开始；主窗口此刻已经是 ready 的老对端
+  const panelIn = [];
+  const fresh = createProtocol({
+    side: PANEL,
+    link: { listen: async (fn) => { panelIn.push(fn); }, send: (p) => { outbox.panel.push(p); } },
+    log: () => {},
+  });
+  await fresh.start({});
+  fresh.send("toggle", { j: 3 });
+  assert.equal(fresh.queued(), 1, "握手前先排队");
+
+  // 主窗口收到新面板的 hello 并回一声；回执投回新面板
+  for (const p of outbox.panel.splice(0)) receivers[MAIN](p);
+  for (const p of outbox.main.splice(0)) panelIn[0](p);
+
+  assert.equal(fresh.queued(), 0, "回执到了，队列补发出去");
+  assert.equal(fresh.peerReady(), true);
+  // 补发出去的那条 toggle 也真的到了主窗口
+  for (const p of outbox.panel.splice(0)) receivers[MAIN](p);
+  assert.deepEqual(got, [{ type: "toggle", j: 3 }], "补发之后消息不再卡住");
+});
+
+test("同一个对端重复喊 hello 只回一次（不会 ping-pong）", async () => {
+  const { main, receivers, outbox } = wire();
+  await main.start({});
+  outbox.main.length = 0;
+  receivers[MAIN]({ type: "hello", epoch: "panel-aaa" });
+  assert.deepEqual(outbox.main.map((p) => p.type), ["hello"]);
+  outbox.main.length = 0;
+  receivers[MAIN]({ type: "hello", epoch: "panel-aaa" });   // 同一个对端再喊
+  assert.equal(outbox.main.length, 0, "同一个 epoch 不再回");
+  receivers[MAIN]({ type: "hello", epoch: "panel-bbb" });   // 新对端
+  assert.deepEqual(outbox.main.map((p) => p.type), ["hello"], "新 epoch 才回");
 });
 
 test("收到坏消息只记日志、不投给处理函数（不认识的 name / 方向错 / 少键 / 多键）", async () => {

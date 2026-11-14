@@ -32,4 +32,4 @@ For a versioned release use `app\release.ps1` above. For a source-only rebuild-a
 2. Update the local deployment at `E:\桌面待办\DesktopTodo`: stop the running `DesktopTodo.exe` process, replace `DesktopTodo.exe` from `dist\DesktopTodo\`, keep `config.json` untouched, and delete the legacy PyInstaller `_internal\` directory if it still exists.
 3. Restart the app so the user can test the new build immediately.
 
-Tests: `node --test app/ui/*.test.js tools/*.test.mjs` (195) and `cargo test` in `app/src-tauri`. `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).
+Tests: `node --test app/ui/*.test.js tools/*.test.mjs` (198) and `cargo test` in `app/src-tauri`. `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).

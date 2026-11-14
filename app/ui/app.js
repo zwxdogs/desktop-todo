@@ -17,27 +17,28 @@ import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
 import { connect, MAIN, requireHost } from './panelproto.js';
 
-window.addEventListener('error', (ev) => {
-  try {
-    window.__TAURI__.core.invoke('log_line', {
-      msg: `js error: ${ev.message} @${ev.filename}:${ev.lineno}:${ev.colno}`,
-    });
-  } catch (_) { /* ignore */ }
-});
-window.addEventListener('unhandledrejection', (ev) => {
-  try {
-    window.__TAURI__.core.invoke('log_line', { msg: `js rejection: ${ev.reason}` });
-  } catch (_) { /* ignore */ }
-});
-
 /* 宿主对象由 Tauri 的初始化脚本在页面脚本**之前**写好（withGlobalTauri），
-   所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。 */
+   所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。
+   声明放在错误钩子之前——钩子里就用得到它，而 let 不像函数声明那样提升。 */
 let HOST = null;
 function host() {
   if (!HOST) HOST = requireHost();
   return HOST;
 }
 const invoke = (cmd, args) => host().core.invoke(cmd, args || {});
+
+window.addEventListener('error', (ev) => {
+  try {
+    host().core.invoke('log_line', {
+      msg: `js error: ${ev.message} @${ev.filename}:${ev.lineno}:${ev.colno}`,
+    });
+  } catch (_) { /* 连宿主对象都拿不到：没有能写日志的地方了 */ }
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  try {
+    host().core.invoke('log_line', { msg: `js rejection: ${ev.reason}` });
+  } catch (_) { /* ignore */ }
+});
 
 const $ = (id) => document.getElementById(id);
 const listEl = $('list');
@@ -678,12 +679,14 @@ function closePanel() {
 
 /* 收起面板，但先把面板里未提交的编辑落回清单（#16 验收：关面板不丢字）。
    Tk close_panel 开头就是 _commit_edits，这里是它的跨窗口等价物。
-   「面板里到底有没有没提交的字」由面板自己的 editing 通知维护：没有就直接收，
-   有才走一趟落定（面板卡死时最多等一次告警，不会每次关面板都卡）。
+
+   一律走一趟落定，不看 S.panelEditing：那条通知只是「面板里有没有字」的提示，
+   漏收一条（面板刚起编辑、通知还在路上）就等于丢字。落定本身很便宜——
+   面板没有未定稿就回一条空回执，一次往返而已，不值得拿正确性换。
    正在编辑的那行被删掉时走裸 closePanel —— 那时用户要的就是丢掉，与 Tk 同款。 */
 async function closePanelSaving() {
   if (!S.panelOpen) return;
-  if (S.panelEditing) await flushPanel();
+  await flushPanel();
   closePanel();
 }
 
@@ -711,14 +714,17 @@ function pushPanelData(focusIdx) {
 }
 
 /* 面板编辑需先落定再动清单（Tk _commit_edits 的跨窗口等价物）。
-   #16：等面板的显式回执，回执里带着它本来要提交的操作——照着落，不猜。
-   回执没来（面板页卡住/没了）只留一条告警，不再用 400ms 墙钟假装提交成功。 */
+   #16：等面板的显式回执，回执里带着它本来要交的操作——照着落，不猜。
+   返回 true = 已落定（或没有内容要落），false = 没等到回执。
+   「没等到」时调用方可以继续（面板页已经死了，它那份编辑本来就取不回来），
+   但那是一条要记下来的告警，不是「大概落定完了吧」。
+   没握手时不发请求——协议自己也会挡（它会记一条「还没握手」并回 null）。 */
 async function flushPanel() {
-  if (!S.panelOpen) return;
-  if (!panel.peerReady()) return;   // 面板页还没握上手：没有它可以交的东西
+  if (!S.panelOpen) return true;
   const ops = await panel.flush();
-  if (ops === null) return;   // 只告警；此时面板的编辑仍留在它自己那儿
+  if (ops === null) return false;
   for (const op of ops) applyPanelOp(op);
+  return true;
 }
 
 /* 面板发来的每一个操作的处理函数：表里一条，这里一条，没有第三种说法。
@@ -750,6 +756,9 @@ const PANEL_HANDLERS = {
   close: () => closePanel(),
   // 面板里有未提交的编辑：主窗口据此放过 Ctrl+Z 与退出前的收尾
   editing: (m) => { S.panelEditing = !!m.on; },
+  /* 面板页（重新）握手：面板重载后本地状态全没了，得把当前内容再推一遍，
+     否则它停在空白上直到下一次清单重画。 */
+  hello: () => { if (S.panelOpen) pushPanelData(); },
 };
 
 /* 一条已编码的面板操作按上面的处理函数落。 */
@@ -792,11 +801,14 @@ function pAddBelow(kind, j) {
 
 /* 切到另一个文件（更换文件 / 新建共用）。身份只从命令回传的 {file,title} 采纳（#12）：
    「当前打开哪个文件」的唯一所有者在 Rust，这里不自己拼路径、也不猜标题；
-   只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。 */
+   只负责重新装载并把它落进 config.json；详情面板还挂着旧文件的行，一并关掉。
+
+   顺序要紧：**先落定、再采纳新身份**。落定会走 list.setText，而它排的写盘用的是
+   S.file——身份先换掉的话，面板里那份没提交的字会被写到新文件上去。 */
 async function switchToFile(identity) {
+  await closePanelSaving();   // 面板里改了一半的先落回旧文件
   adoptFile(identity);
   S.missingShown = false;
-  await closePanelSaving();   // 面板里改了一半的先落回旧文件，再换
   await loadFile();
   invoke('save_config');
 }
