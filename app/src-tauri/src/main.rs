@@ -762,14 +762,36 @@ async fn new_md_file(app: AppHandle, content: String) -> Result<Option<NewFileOu
     Ok(Some(NewFileOut { path: p.to_string_lossy().into_owned(), created }))
 }
 
+// explorer 的命令行只认**反斜杠分隔的绝对路径**：拿 `E:/项目/待办.md` 这种正斜杠路径喂 `/select,`，
+// 参数被当成非法，explorer 干脆打开自己的默认文件夹（这台机器上是「桌面」），既不进父目录也不选中文件
+// —— 2026-11-14 用户报的「点打开文件位置，没找到相应的 md」就是这个。config.json 里那条路径是 Tk 时代
+// 留下的正斜杠写法，Rust 侧一直原样转手（Tk 版拿到的是 Python 的反斜杠路径，所以当年没暴露）。
+// canonicalize 顺手把相对路径补成绝对路径，但它给出的 `\\?\` / `\\?\UNC\` 前缀 explorer 同样不认，要剥掉。
+fn explorer_path(s: &str) -> String {
+    let s = s.replace('/', "\\");
+    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{}", rest)
+    } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
+fn absolute_explorer_path(path: &Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    explorer_path(&abs.to_string_lossy())
+}
+
 #[tauri::command]
 async fn open_file_location(app: AppHandle, file: String) {
     use std::os::windows::process::CommandExt;
     let path = PathBuf::from(&file);
     if path.exists() {
-        // canonical 形式: explorer /select,"路径"
-        match std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn() {
-            Ok(_) => app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open location: {}", path.display())),
+        // explorer /select,"路径"
+        let target = absolute_explorer_path(&path);
+        match std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", target)).spawn() {
+            Ok(_) => app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open location: {}", target)),
             Err(e) => {
                 show_message_box("info", &format!("打开失败：{}", e));
                 app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open location failed: {:?}", e));
@@ -777,8 +799,9 @@ async fn open_file_location(app: AppHandle, file: String) {
         }
     } else if path.parent().map(|d| d.is_dir()).unwrap_or(false) {
         let d = path.parent().unwrap();
-        match std::process::Command::new("explorer").arg(d).spawn() {
-            Ok(_) => app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open dir (file missing): {}", d.display())),
+        let target = absolute_explorer_path(d);
+        match std::process::Command::new("explorer").arg(&target).spawn() {
+            Ok(_) => app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open dir (file missing): {}", target)),
             Err(e) => {
                 show_message_box("info", &format!("打开失败：{}", e));
                 app.state::<Mutex<Shared>>().lock().unwrap().log(&format!("open location failed: {:?}", e));
@@ -1373,5 +1396,29 @@ mod dock_style_tests {
             watchdog_step(Duration::from_secs(999), limit, WATCHDOG_MAX_RELOADS, true, true),
             WatchdogStep::Idle
         ));
+    }
+}
+
+// 2026-11-14 用户报的「点打开文件位置，没找到相应的 md」：explorer 只认反斜杠分隔的绝对路径。
+#[cfg(test)]
+mod explorer_path_tests {
+    use super::*;
+
+    #[test]
+    fn forward_slashes_become_backslashes() {
+        // config.json 里的原样路径（Tk 时代留下的正斜杠写法）
+        assert_eq!(explorer_path("E:/项目/待办.md"), "E:\\项目\\待办.md");
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_stripped() {
+        // canonicalize 的返回形式 explorer 同样不认
+        assert_eq!(explorer_path("\\\\?\\E:\\项目\\待办.md"), "E:\\项目\\待办.md");
+        assert_eq!(explorer_path("\\\\?\\UNC\\server\\share\\a.md"), "\\\\server\\share\\a.md");
+    }
+
+    #[test]
+    fn native_path_is_untouched() {
+        assert_eq!(explorer_path("E:\\项目\\待办.md"), "E:\\项目\\待办.md");
     }
 }
