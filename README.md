@@ -36,6 +36,8 @@ node --test app/ui/*.test.js tools/*.test.mjs
 
 纯函数（Markdown 解析/序列化、子树、删除、批量删除已完成、缩进、拖动排序、滚动条几何）、清单模块、撤销栈、文件身份、拖动落点、面板协议、发布版本账目共 199 项。
 
+Rust 壳另有 `cargo test`（在 `app/src-tauri` 里跑）40 项：两态样式、看门狗、退出宽限、文件身份与读写、config、屏幕几何、贴桌面五步维护、启动装配、explorer 路径。
+
 ## 构建
 
 ```

@@ -5,6 +5,15 @@ edition = "2021"
 description = "桌面待办 —— Markdown 待办清单固定在 Windows 桌面（Tauri 2）"
 license = "MIT"
 
+# 二进制只是进程外壳（windows_subsystem 属性）；实现全在 lib 里，便于按模块测。
+[lib]
+name = "desktop_todo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "desktop-todo"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

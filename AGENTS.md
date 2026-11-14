@@ -12,6 +12,10 @@ Five canonical triage roles; each label string equals its role name. See `docs/a
 
 Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
+### Rust shell layout
+
+`app/src-tauri/src/main.rs` is only a 4-line process shell (`windows_subsystem` + `app::run()`); everything lives in `lib.rs` and its modules, each owning one seam — `win32` (the only place with `unsafe extern`), `geometry`, `consts`, `dialog`, `config`, `files`, `state` (the `Host` handle; nobody outside a module touches its lock), `persist`, `dock` (two modes; `dock::enter` is the single call that pins to the desktop), `panel`, `tray`, `watchdog`, `exit`, `maintenance` (the five named poll steps), `commands` (parameter adapters only — no Win32, no locks), `app` (startup wiring). Keep new code inside the module that owns the state it touches; don't reintroduce a shared grab-bag struct.
+
 ### Baseline
 
 The Tauri 2 implementation (`app/`) is the baseline. The Tk 0.2.7 implementation (`todo.pyw`, its packaging chain and the root `build.ps1`) was deleted in 2026-11 — see `docs/adr/0006-remove-tk-fallback.md`; it survives only in git history and as the reference column of `app/PARITY.md`. Behaviour parity with 0.2.7 is **not** a constraint; record any intentional deviation in `app/PARITY.md` §3.
@@ -32,4 +36,4 @@ For a versioned release use `app\release.ps1` above. For a source-only rebuild-a
 2. Update the local deployment at `E:\桌面待办\DesktopTodo`: stop the running `DesktopTodo.exe` process, replace `DesktopTodo.exe` from `dist\DesktopTodo\`, keep `config.json` untouched, and delete the legacy PyInstaller `_internal\` directory if it still exists.
 3. Restart the app so the user can test the new build immediately.
 
-Tests: `node --test app/ui/*.test.js tools/*.test.mjs` (199) and `cargo test` in `app/src-tauri`. `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).
+Tests: `node --test app/ui/*.test.js tools/*.test.mjs` (199) and `cargo test` in `app/src-tauri` (40). `app\build.ps1` is the only build path — there is no Tk build script any more (ADR 0006).
