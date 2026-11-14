@@ -202,6 +202,27 @@ test("写盘合并：窗口内连着改几次只落一次盘，内容是最后�
   assert.equal(calls.after[0][0], true);
 });
 
+test("写盘失败：原因交给 afterSave，不只是交一个 false", async () => {
+  // 界面上那条「保存失败」要说明为什么（磁盘满 / 文件被占 / 目录只读），
+  // 所以写盘抛出来的原因必须原样传到 afterSave —— 吞成 false 之后只能说「未知原因」（#18）
+  const seen = [];
+  const list = createList({
+    lines: md.parseText("- [ ] 甲\n"),
+    nl: "\n",
+    debounceMs: 5,
+    hooks: {
+      render: () => {},
+      write: async () => { throw new Error("replace: 另一个程序正在使用此文件"); },
+      afterSave: (ok, n, err) => { seen.push([ok, n, err && err.message]); },
+    },
+  });
+  list.toggle(0);
+  await sleep(30);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][0], false, "失败就是失败");
+  assert.match(seen[0][2], /另一个程序正在使用此文件/, "原因不能在路上被吞掉");
+});
+
 test("每次真变更都压一次快照，供入口收掉回执浮层", () => {
   const { list, calls } = mk("- [ ] 甲\n");
   list.toggle(0);

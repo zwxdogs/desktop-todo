@@ -30,6 +30,11 @@
     <button class="hbtn" id="btn-pin" title="固定在桌面 / 普通窗口"></button>
     <button class="hbtn" id="btn-close" title="退出"></button>
   </header>
+  <!-- 顶栏提示条（#18）：写盘失败一直挂着、点它重试；一次性的短消息约 3 秒自己消失。
+       放在标题栏下面单独一行，不挤占清单，也不动窗口高度以外的东西。
+       role=alert 是给屏幕阅读器的：写盘失败属于要立刻打断的消息，不是背景状态。
+       能点的那条（写盘失败）由 app.js 补 tabindex 与 role=button。 -->
+  <div id="notice" role="alert" aria-live="assertive"></div>
   <div id="list"></div>
   <div id="grip" title="">
     <svg viewBox="0 0 22 22" fill="none">

@@ -115,8 +115,14 @@ impl Host {
         }
     }
 
-    /// 写盘失败（多半是程序目录只读）：提示一次，写进日志，之后静默。
+    /// 写盘失败：只有「目录/文件不可写」这一类才弹那个「把文件夹移到可写位置」的框。
+    /// 其余失败（磁盘满、目标被别的程序占用、路径不合法）各自处置办法不同，
+    /// 一律套上「程序目录不可写」只会把人带偏——它们交给界面上那条提示条（#18）。
     pub fn warn_readonly(&self, msg: &str) {
+        if !crate::files::is_permission_failure(msg) {
+            self.log(&format!("write failed: {}", msg));
+            return;
+        }
         let env = self.env();
         if env.testing {
             return;

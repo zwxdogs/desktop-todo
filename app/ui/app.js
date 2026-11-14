@@ -16,6 +16,7 @@ import { createRowDrag, mainDropTarget, GRIP_SVG } from './rowdrag.js';
 import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
 import { connect, MAIN, requireHost } from './panelproto.js';
+import { nextNotice, noticeIsClickable } from './notice.js';
 
 /* 宿主对象由 Tauri 的初始化脚本在页面脚本**之前**写好（withGlobalTauri），
    所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。
@@ -41,6 +42,11 @@ window.addEventListener('unhandledrejection', (ev) => {
 });
 
 const $ = (id) => document.getElementById(id);
+
+/* 编辑目标消失时说的那句话：`commitEdit` 与 `closeEditor` 共用同一份文案。 */
+const EDIT_GONE = '这一条已经不在了，刚才改的字没有写进去';
+/* 一次性短消息挂多久（回执浮层也是 3 秒：两处各自计时，但时长只在这里定义一次）。 */
+const INFO_NOTICE_MS = 3000;
 const listEl = $('list');
 const titleEl = $('title');
 const menuEl = $('menu');
@@ -69,8 +75,19 @@ const list = createList({
     render: (lines) => { S.lines = lines; renderList(); },
     write: (text) => writeText(text),
     afterSave: (ok, n, err) => {
-      if (ok) log(`saved ${n} lines`);
-      else log(`save failed: ${err}`);
+      if (ok) {
+        log(`saved ${n} lines`);
+        // 写成功：把上一次的「保存失败」收掉（短消息有自己的过期时间，不归这里管）
+        setNotice({ type: 'saved' });
+      } else {
+        log(`save failed: ${err}`);
+        // 写盘失败必须留在界面上：用户以为自己改了，文件里其实没有（#18 第三段）。
+        // 原因来自 Rust 的 write_md（磁盘满 / 文件被占用 / 目录只读…），处置办法各不相同。
+        setNotice({
+          type: 'save-failed',
+          text: `保存失败，改动没有写进文件：${err ? String(err.message || err) : '未知原因'}`,
+        });
+      }
     },
     onSnapshot: hideToast,
   },
@@ -142,14 +159,31 @@ async function fileStateExists() {
 }
 
 /* Tk write_text(550-563)：Rust 侧负责 BOM/tmp/原子替换/只读警告；
-   写成功后 JS 自记 lastSeen（Tk self.last_seen = stat_now()），否则 poll 误报外部变化并清撤销栈 */
+   写成功后 JS 自记 lastSeen（Tk self.last_seen = stat_now()），否则 poll 误报外部变化并清撤销栈。
+
+   写失败的原因要能到界面上（#18）：Rust 的 write_md 失败时抛 Err(原因)，这里不再把它
+   咽成一个 false——吞掉之后提示条只能写「未知原因」，用户没法判断是磁盘满了还是文件被占着。
+   抛给清单模块的 afterSave（它把 err 交给提示条）。
+
+   命令成功时返回的是 Ok(()) = JS 侧的 undefined，所以「有没有写进去」由**是否抛错**表达，
+   不看返回值：跑完没抛就是写进去了。 */
 async function writeText(content) {
   try {
-    const ok = await invoke('write_md', { file: S.file, content, hasBom: list.hasBom() });
-    if (ok) S.lastSeen = await statNow();
-    return ok;
+    await invoke('write_md', { file: S.file, content, hasBom: list.hasBom() });
+    S.lastSeen = await statNow();
+    return true;
   } catch (e) {
     log(`write failed: ${e}`);
+    throw new Error(String(e));
+  }
+}
+
+/* 同上，但失败不抛：切文件、新建、退出、点提示条重试这几条路径要「按失败继续」，
+   不能因为一次写不进去就把后续动作（换文件 / 退出）也卡死。失败原因仍进日志。 */
+async function saveQuietly(content) {
+  try {
+    return await writeText(content);
+  } catch (e) {
     return false;
   }
 }
@@ -159,14 +193,20 @@ async function writeText(content) {
    都会带着变更描述回调过来，十二处入口不再各自判断。 */
 function listBefore(change) {
   const pi = list.panelIndex();   // 面板盯着的那一行；模块是锚的唯一所有者
+  const ei = editIndex();         // 正在编辑的那一行现在在哪（-1 = 已经认不出来）
   if (change.kind === 'remove') {
-    // 正在编辑的那行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964）
-    if (S.edit && S.edit.index >= change.index && S.edit.index < change.end) discardEditor();
+    // 正在编辑的那行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964）。
+    // 但要说一声：用户刚打的字没了，静默丢掉是最糟的那种「成功」。
+    if (ei >= change.index && ei < change.end) {
+      discardEditor();
+      showInfoNotice('正在编辑的这一条被删掉了，刚改的字没有写进去');
+    }
     if (S.panelOpen && pi >= change.index && pi < change.end) closePanel();
   } else if (change.kind === 'deleteCompleted') {
     const covers = (k) => change.blocks.some((b) => b.i <= k && k < b.end);
-    // 被删的那行不提交（丢字是用户要的），没被删的先落定，别把打的字丢了
-    if (S.edit) { if (covers(S.edit.index)) discardEditor(); else closeEditor(); }
+    // 被删的那行不提交（丢字是用户要的），没被删的先落定，别把打的字丢了。
+    // 批量删除本身有回执浮层报数，所以这一支不再叠一条短消息。
+    if (S.edit) { if (covers(ei)) discardEditor(); else closeEditor(); }
     if (S.panelOpen && pi >= 0 && covers(pi)) closePanel();
   }
 }
@@ -405,14 +445,23 @@ function toggleLine(i) {
   list.toggle(i);
 }
 
+/* 正在编辑的那一行现在在哪（-1 = 它已经不在清单里，或认不准是哪一条）。
+   编辑态存的是**行锚**不是下标：编辑期间插入、删除、拖动、外部重载都会让下标失效，
+   拿旧下标提交就是「字写到别人头上」（#18）。 */
+function editIndex() {
+  return S.edit ? list.indexOfAnchor(S.edit.anchor) : -1;
+}
+
 function editRow(i) {
   if (S.missingShown) return;
   const info = ROWS.get(i);
   if (!info || !info.label) return;
-  if (S.edit && S.edit.index === i) { S.edit.input.focus(); return; }
+  if (S.edit && editIndex() === i) { S.edit.input.focus(); return; }
   if (S.edit) closeEditor();
   const ln = S.lines[i];
   if (!ln) return;
+  const anchor = list.anchorAt(i);
+  if (!anchor) return;
   const handle = openRowEdit({
     label: info.label,
     text: ln.text,
@@ -420,7 +469,7 @@ function editRow(i) {
     onFinish: (v) => commitEdit(v),
     onCancel: () => cancelEdit(),
   });
-  S.edit = { index: i, input: handle.input, handle };
+  S.edit = { anchor, input: handle.input, handle };
 }
 
 /* 编辑框收拾干净：清状态、拆输入框、撤掉这一行的 editing 标记（DOM 由 rowedit.js 收） */
@@ -431,14 +480,20 @@ function dropEditor() {
   entry.handle.teardown();
 }
 
-/* 编辑框提交（todo.pyw:854-864）：值不做 trim，空文本照写 */
+/* 编辑框提交（todo.pyw:854-864）：值不做 trim，空文本照写。
+   落字前先按锚找回它自己：找不到就明确丢弃并提示，绝不退回旧下标。 */
 function commitEdit(value) {
   if (!S.edit) return;
-  const index = S.edit.index;
+  const anchor = S.edit.anchor;
   const v = value !== undefined ? value : S.edit.input.value;
   dropEditor();
-  if (!(index >= 0 && index < list.lines().length)) { renderList(); return; }
-  list.setText(index, v);   // 行已不在（外部重载过）由模块挡掉
+  const index = list.indexOfAnchor(anchor);
+  if (index < 0) {
+    showInfoNotice(EDIT_GONE);
+    renderList();
+    return;
+  }
+  list.setText(index, v);
 }
 
 function cancelEdit() {
@@ -447,16 +502,20 @@ function cancelEdit() {
   renderList();
 }
 
-/* 静默提交不重渲染（todo.pyw:879-890 close_editor） */
+/* 静默提交不重渲染（todo.pyw:879-890 close_editor）。
+   这是「点别处 / 点顶栏 / 切文件」那一类收尾，也必须按锚落字。 */
 function closeEditor() {
   if (!S.edit) return;
-  const { index, input } = S.edit;
+  const { anchor, input } = S.edit;
   dropEditor();
-  if (index >= 0 && index < list.lines().length) {
-    try {
-      list.setText(index, input.value, { quiet: true });
-    } catch (e) { /*Tk 同款吞异常*/ }
+  const index = list.indexOfAnchor(anchor);
+  if (index < 0) {
+    showInfoNotice(EDIT_GONE);
+    return;
   }
+  try {
+    list.setText(index, input.value, { quiet: true });
+  } catch (e) { /*Tk 同款吞异常*/ }
 }
 
 /* 正在编辑的行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964） */
@@ -539,7 +598,7 @@ function showToast(main, sub, onUndo) {
   toastEl.onclick = onUndo ? () => { hideToast(); onUndo(); } : null;
   toastEl.classList.add('show');
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(hideToast, 3000);
+  toastTimer = setTimeout(hideToast, INFO_NOTICE_MS);
 }
 
 function hideToast() {
@@ -651,6 +710,61 @@ function menuBlank(x, y) {
    所以这里冒泡期的“点菜单外面关掉”永远收不到 —— 菜单点开后点标题栏关不掉。
    0.4.2 的文件菜单下拉改用捕获期 pointerdown 绕开这条路径（见 bindChrome）。
    右键标题栏现在什么也不发生（全局 contextmenu preventDefault 兜掉 WebView2 默认菜单）。 */
+
+/* ---------- 顶栏提示条（#18 第三段） ----------
+   状态机在 notice.js（纯函数、有测试）：这里只负责把状态画出来、管定时器、接点击。
+   为什么需要它：写盘失败以前只进 widget.log，用户看到的是打字、回车、待办正常显示，
+   而文件里没有。桌面挂件上「改了却没写进去」必须当场看得见。 */
+const noticeEl = $('notice');
+let noticeState = null;   // null | { kind:'save', text } | { kind:'info', text, token }
+let noticeTimer = null;
+let noticeToken = 0;
+
+function setNotice(ev) {
+  noticeState = nextNotice(noticeState, ev);
+  paintNotice();
+}
+
+/* 一次性短消息：约 3 秒自己收掉。写盘失败还挂着时它不会顶上去（notice.js 里的政策）。 */
+function showInfoNotice(text) {
+  noticeToken += 1;
+  const token = noticeToken;
+  setNotice({ type: 'info', text, token });
+  if (noticeState && noticeState.kind === 'info' && noticeState.token === token) {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      noticeTimer = null;
+      setNotice({ type: 'expire', token });
+    }, INFO_NOTICE_MS);
+  }
+}
+
+function paintNotice() {
+  if (!noticeEl) return;
+  const s = noticeState;
+  const clickable = noticeIsClickable(s);
+  noticeEl.textContent = s ? s.text : '';
+  noticeEl.classList.toggle('show', !!s);
+  noticeEl.classList.toggle('kind-save', !!s && s.kind === 'save');
+  noticeEl.classList.toggle('kind-info', !!s && s.kind === 'info');
+  noticeEl.title = clickable ? '点这里重试保存' : '';
+  // 能点时它是个按钮：不给键盘用户留一个「看得见点不到」的死角
+  if (clickable) {
+    noticeEl.setAttribute('role', 'button');
+    noticeEl.setAttribute('tabindex', '0');
+  } else {
+    noticeEl.setAttribute('role', 'alert');
+    noticeEl.removeAttribute('tabindex');
+  }
+}
+
+/* 点写盘失败那条 = 重试：把当前清单再写一次（成功的分支会自己把提示收掉）。 */
+async function retrySave() {
+  if (!noticeIsClickable(noticeState)) return;
+  if (!listReady()) return;
+  const ok = await saveQuietly(list.text());
+  if (ok) setNotice({ type: 'saved' });
+}
 
 /* ---------- 详情面板（todo.pyw:1074-1261；#16 起跨窗只走 panelproto.js） ----------
    这里只回答「面板的每个操作在清单上是什么」以及「面板该看到哪些行」。
@@ -810,12 +924,17 @@ function pAddBelow(kind, j) {
    2. **马上把这一笔写下去** —— 紧接着的 loadFile 第一句就是 list.cancelSave()，
       否则刚排上的写盘会被它取消掉，面板里那份字只是进了内存、随即被新文件覆盖。
       身份此刻还是旧的，所以写到的是旧文件（正确目标）。
-   3. 换身份、重新装载。 */
+   3. 换身份、重新装载。
+
+   第 2 步若写不进去，那几行字就真的没了（接下来 loadFile 会把内存整份换成新文件）。
+   所以这里不能只记日志：先让人知道「切过去了，但旧文件里那几笔没写进去」，再继续切——
+   停下来不切反而更糟，用户点的是「换文件」。 */
 async function switchToFile(identity) {
   await closePanelSaving();          // 面板里改了一半的先落回清单（排写盘）
   if (list.pending()) {              // 排上了就立刻落盘，别让 loadFile 把它取消掉
-    await writeText(list.text());
+    const ok = await saveQuietly(list.text());
     list.cancelSave();
+    if (!ok) showInfoNotice('切走之前旧文件没写进去，刚才那几笔改动没能保住');
   }
   adoptFile(identity);
   S.missingShown = false;
@@ -832,11 +951,14 @@ async function chooseFile() {
    指到已存在的文件则当"打开已有文件"处理，绝不覆盖。 */
 async function newFile() {
   await flushPanel();    // 面板里改了一半的任务名先落回来，别丢
-  // 再把还没落盘的改动写回去：切走之后 S.lines 马上就换成新文件的内容
+  // 再把还没落盘的改动写回去：切走之后 S.lines 马上就换成新文件的内容。
+  // 写失败要说一声：接下来 switchToFile 会把内存整份换掉，那几笔就真的没了。
   const pending = list.pending();
   list.cancelSave();
   closeEditor();
-  if (pending && S.loaded && !S.missingShown) await writeText(list.text());
+  if (pending && S.loaded && !S.missingShown && !(await saveQuietly(list.text()))) {
+    showInfoNotice('新建之前旧文件没写进去，刚才那几笔改动没能保住');
+  }
   let res;
   try {
     res = await invoke('new_md_file', { content: starterText('\r\n') });
@@ -908,8 +1030,10 @@ async function exitApp() {
     // 没装载成功就绝不写盘（0.4.0 修）：以前无条件写，退出一次就"生"出一个空文件，
     // 下次启动看着像本来就有文件，示例内容和新建引导再也不会出现；
     // 读取失败（比如文件不是 UTF-8）时同理——内存里那份空清单不是文件的内容。
-    if (S.loaded && !S.missingShown && await writeText(list.text())) {
-      log(`saved ${list.lines().length} lines`);
+    // 退出时写失败已经来不及在界面上说了（窗口马上就没了），所以只留日志，
+    // 由 Rust 侧 exit 前那一次 persist 与磁盘状态兜底（#18 只负责「用着的时候看得见」）。
+    if (S.loaded && !S.missingShown && !(await saveQuietly(list.text()))) {
+      log('exit: 退出前最后一次写盘失败');
     }
   } catch (e) { /* Tk on_close 同款吞异常 */ }
   log('exit');
@@ -980,6 +1104,17 @@ function bindChrome() {
   on('btn-file', toggleFileMenu);
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
   on('btn-clear-done', deleteCompletedTodos);
+  // 提示条：只有「写盘失败」那条能点，点了就重试保存（键盘 Enter / Space 同效）
+  if (noticeEl) {
+    noticeEl.addEventListener('click', () => { retrySave(); });
+    noticeEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (!noticeIsClickable(noticeState)) return;
+      e.preventDefault();
+      retrySave();
+    });
+    noticeEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+  }
   // 图标只在 app.js 有一份定义：HTML 里只留空按钮。
   const ICONS = {
     'btn-file': ICON_FILE_SVG, 'btn-reveal': ICON_FOLDER_SVG,

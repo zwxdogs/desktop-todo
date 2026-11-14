@@ -77,6 +77,18 @@ pub fn read(path: &Path) -> Result<ReadOut, String> {
     Ok(ReadOut { text, has_bom, nl: nl.to_string() })
 }
 
+/// 「这次写失败是不是权限/只读这一类」——决定要不要弹「把文件夹移到可写位置」那个框。
+///
+/// 早先这里没有分类：任何一次写失败都被当成「程序目录不可写」，于是磁盘满、目标文件被
+/// 别的程序占着的时候，用户看到的是一个让人搬文件夹的错误建议（#18 复查发现）。
+/// 只认 os error 5（拒绝访问）与 19/13（只读介质 / 权限不足），其余一律不当成权限问题。
+pub fn is_permission_failure(msg: &str) -> bool {
+    // std::io::Error 的 Display 是「拒绝访问。 (os error 5)」这种形式，英文系统上是
+    // "Access is denied. (os error 5)"——按 os error 号认，不按本地化文本认。
+    const PERMISSION_CODES: [&str; 3] = ["(os error 5)", "(os error 19)", "(os error 13)"];
+    PERMISSION_CODES.iter().any(|c| msg.contains(c))
+}
+
 /// 与 todo.pyw write_text 一致：tmp + os.replace 原子替换，保留 BOM。
 pub fn write(path: &Path, content: &str, has_bom: bool) -> Result<(), String> {
     let mut data: Vec<u8> = Vec::with_capacity(content.len() + 3);
@@ -281,11 +293,38 @@ mod file_identity_tests {
     }
 }
 
+// #18 复查发现的活 bug：任何一次写失败都被当成「程序目录不可写」，于是磁盘满、
+// 目标文件被别的程序占着的时候，用户收到的是「请把整个文件夹移到可写目录」这个
+// 与事实无关的建议。分类只认 os error 号，不认本地化文本。
+#[cfg(test)]
+mod write_failure_tests {
+    use super::*;
+
+    #[test]
+    fn permission_errors_are_recognised() {
+        // 只读目录 / 只读介质 / 权限不足：这三类才该建议搬文件夹
+        assert!(is_permission_failure("write: 拒绝访问。 (os error 5)"));
+        assert!(is_permission_failure("replace: Access is denied. (os error 5)"));
+        assert!(is_permission_failure("write: 介质受写保护。 (os error 19)"));
+        assert!(is_permission_failure("write: 权限不足。 (os error 13)"));
+    }
+
+    #[test]
+    fn other_failures_are_not_mistaken_for_readonly_folders() {
+        // 磁盘满：让人去搬文件夹毫无用处，还会掩盖真正的原因
+        assert!(!is_permission_failure("write: 磁盘空间不足。 (os error 112)"));
+        // 目标文件被别的程序占着
+        assert!(!is_permission_failure("replace: 另一个程序正在使用此文件，进程无法访问。 (os error 32)"));
+        // 路径本身不合法
+        assert!(!is_permission_failure("write: 系统找不到指定的路径。 (os error 3)"));
+        assert!(!is_permission_failure(""));
+    }
+}
+
 // 2026-11-14 用户报的「点打开文件位置，没找到相应的 md」：explorer 只认反斜杠分隔的绝对路径。
 #[cfg(test)]
 mod explorer_path_tests {
     use super::*;
-
     #[test]
     fn forward_slashes_become_backslashes() {
         // config.json 里的原样路径（Tk 时代留下的正斜杠写法）

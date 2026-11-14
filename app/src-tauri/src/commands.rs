@@ -42,14 +42,21 @@ pub async fn read_md(file: String) -> Result<ReadOut, String> {
     files::read(Path::new(&file))
 }
 
-/// 失败时不报错而是返回 false：与 Tk write_text 一致（弹窗提示后继续运行）。
+/// 写失败时把原因**抛给前端**（不再只回一个 false）：界面上那条「保存失败」要说明
+/// 为什么失败——磁盘满、文件被别的程序占着、目录只读，处置办法完全不同（#18）。
+///
+/// 返回 `Result<(), String>` 而不是 `Result<bool, String>`：成功就是 `Ok(())`，
+/// 失败就是 `Err(原因)`，没有「成功但返回 false」这种第三种状态。
+///
+/// 「目录不可写」那类仍然弹一次原生框（`warn_readonly` 自己按 os error 号分类并去重），
+/// 其余的失败只进提示条——以前它把任何写失败都判成这一类，磁盘满时会建议人去搬文件夹。
 #[tauri::command]
-pub async fn write_md(app: tauri::AppHandle, file: String, content: String, has_bom: bool) -> Result<bool, String> {
+pub async fn write_md(app: tauri::AppHandle, file: String, content: String, has_bom: bool) -> Result<(), String> {
     match files::write(Path::new(&file), &content, has_bom) {
-        Ok(()) => Ok(true),
+        Ok(()) => Ok(()),
         Err(e) => {
             Host::of(&app).warn_readonly(&e);
-            Ok(false)
+            Err(e)
         }
     }
 }

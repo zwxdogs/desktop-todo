@@ -93,6 +93,25 @@ body {
   pointer-events: none;
 }
 
+/* ---------- 顶栏提示条（#18） ----------
+   写盘失败是一条常驻消息：用户以为改了、文件里其实没有，这件事必须一直看得见。
+   一次性的短消息（例如「编辑已丢弃」）用它同一处，约 3 秒自己收掉。
+   没消息时 display:none，不占高度——正常使用看不到这一行。 */
+#notice {
+  display: none;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 9pt;
+  line-height: 16px;
+  border-bottom: 1px solid #DFE4EA;
+  overflow-wrap: anywhere;
+}
+#notice.show { display: block; }
+#notice.kind-info { background: #FFF8E6; color: #7A5B00; }
+/* 只有写盘失败那条能点：点它 = 重试保存 */
+#notice.kind-save { background: #FDECEA; color: #9B2C2C; cursor: pointer; }
+#notice.kind-save:hover { background: #FBDDD9; }
+
 /* ---------- 清单区（0.4.1 起是全窗口唯一的滚动容器） ---------- */
 #list {
   flex: 1;
