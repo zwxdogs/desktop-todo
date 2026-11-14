@@ -12,6 +12,9 @@ import { starterText, missingHint } from './starter.js';
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
 import { readIdentity } from './identity.js';
+import { createRowDrag, mainDropTarget, GRIP_SVG } from './rowdrag.js';
+import { createMenu } from './rowmenu.js';
+import { openRowEdit } from './rowedit.js';
 
 window.addEventListener('error', (ev) => {
   try {
@@ -44,7 +47,7 @@ const S = {
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
   loaded: false,   // 内存里的清单是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
-  edit: null,            // { index, input }
+  edit: null,            // { index, input, handle }
   panelOpen: false,
   panelTodo: -1,
   panelEditing: false,   // 面板窗口里有未提交编辑（Tk p_edit_entry 非空）
@@ -77,23 +80,28 @@ const ROWS = new Map();  // i -> { row, label, box }
 
 const VIS = [];          // 可拖行（分组标题 / 待办）按文档顺序：[{ i, el }]
 
-/* 拖动排序状态（0.4.0）：pointer 自绘，不用 HTML5 DnD（WebView2 里不可靠）。 */
-const EDGE_SCROLL = 24;  // 指针进到窗口上下这么多像素内就开始自动滚动
-const EDGE_STEP = 12;    // 自动滚动每帧滚多少像素
+/* 行交互（#15）：指针、拖影、插入线、自动滚、落点求解、行菜单、内联编辑都收进共享模块，
+   这里只剩主窗口的政策——哪一行能拖、能不能插进这个分组、落点怎么落回清单下标。 */
+const drag = createRowDrag({
+  container: listEl,
+  token: () => S.lines,
+  rows: () => VIS.map((v) => ({ key: v.i, el: v.el })),
+  canStart: () => !S.missingShown,
+  ghost: (key) => {
+    const ln = S.lines[key];
+    const [todos, , notes] = ln.kind === 'todo' ? md.subtreeStats(S.lines, key) : [0, 0, 0];
+    return { text: ln.text || '（空）', count: todos + notes, header: ln.kind === 'header' };
+  },
+  resolve: (rows, y, from) => mainDropTarget(S.lines, rows, y, from),
+  stale: (token) => S.lines !== token,
+  onStart: () => closeEditor(),
+  onDrop: (from, target) => {
+    // 落点自带 slot：末端之后可能是没进 rows 的隐藏行，不能再用 rowKey 反推。
+    if (list.move(from, target.slot)) log(`drag move ${from} -> ${target.slot}`);
+  },
+});
 
-const DND = {
-  on: false,
-  from: -1,
-  slot: -1,
-  lastY: 0,        // 上一次指针高度：自动滚动时靠它重算落点
-  edge: 0,         // -1 上滚 / 1 下滚 / 0 不动
-  pump: 0,         // requestAnimationFrame id
-  lines: null,     // 起拖时的数组引用：轮询重载换了数组就放弃这次拖动
-  ghost: null,
-  line: null,
-  srcEl: null,
-  ghostH: 0,
-};
+const menu = createMenu(menuEl);
 
 /* ---------- 基础设施 ---------- */
 
@@ -263,7 +271,7 @@ function makeBadge(td, dn, nt) {
 }
 
 function renderList(focusIdx) {
-  if (DND.on) cleanupDrag();           // 重画行之前先收掉拖动浮层（外部重载可能把行换掉）
+  drag.cleanup();           // 重画行之前先收掉拖动浮层（外部重载可能把行换掉）
   const sc = listEl;                   // 0.4.1：滚动容器是 #list（页面本身不再滚）
   const max0 = sc.scrollHeight - sc.clientHeight;
   const frac = max0 > 0 ? sc.scrollTop / max0 : 0;
@@ -399,57 +407,46 @@ function editRow(i) {
   if (S.edit && S.edit.index === i) { S.edit.input.focus(); return; }
   if (S.edit) closeEditor();
   const ln = S.lines[i];
-  const input = document.createElement('input');
-  input.className = 'row-edit' + (ln.checked ? ' done' : '');
-  input.value = ln.text;
-  info.label.style.display = 'none';
-  info.row.classList.add('editing');   // 编辑中把加号和把手收起来（CSS 只管显隐）
-  info.row.insertBefore(input, info.label.nextSibling);
-  input.select();
-  input.focus();
-
-  const entry = { index: i, input, row: info.row };
-  S.edit = entry;
-
-  input.addEventListener('keydown', (e) => {
-    if (e.isComposing || e.keyCode === 229) return;   // IME 组合中的回车/ESC 不处理
-    if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); }
+  if (!ln) return;
+  const handle = openRowEdit({
+    label: info.label,
+    text: ln.text,
+    done: ln.checked,
+    onFinish: (v) => commitEdit(v),
+    onCancel: () => cancelEdit(),
   });
-  input.addEventListener('blur', () => { if (S.edit === entry) commitEdit(); });
-  input.addEventListener('compositionend', () => input.focus());
+  S.edit = { index: i, input: handle.input, handle };
 }
 
-/* 编辑框收拾干净：清状态、拆输入框、撤掉这一行的 editing 标记 */
-function dropEditor(entry) {
-  if (!entry) return;
+/* 编辑框收拾干净：清状态、拆输入框、撤掉这一行的 editing 标记（DOM 由 rowedit.js 收） */
+function dropEditor() {
+  if (!S.edit) return;
+  const entry = S.edit;
   S.edit = null;
-  if (entry.input) entry.input.remove();
-  if (entry.row) entry.row.classList.remove('editing');
+  entry.handle.teardown();
 }
 
 /* 编辑框提交（todo.pyw:854-864）：值不做 trim，空文本照写 */
-function commitEdit() {
+function commitEdit(value) {
   if (!S.edit) return;
-  const entry = S.edit;
-  const { index, input } = entry;
-  dropEditor(entry);
+  const index = S.edit.index;
+  const v = value !== undefined ? value : S.edit.input.value;
+  dropEditor();
   if (!(index >= 0 && index < list.lines().length)) { renderList(); return; }
-  list.setText(index, input.value);   // 行已不在（外部重载过）由模块挡掉
+  list.setText(index, v);   // 行已不在（外部重载过）由模块挡掉
 }
 
 function cancelEdit() {
   if (!S.edit) return;
-  dropEditor(S.edit);
+  dropEditor();
   renderList();
 }
 
 /* 静默提交不重渲染（todo.pyw:879-890 close_editor） */
 function closeEditor() {
   if (!S.edit) return;
-  const entry = S.edit;
-  const { index, input } = entry;
-  dropEditor(entry);
+  const { index, input } = S.edit;
+  dropEditor();
   if (index >= 0 && index < list.lines().length) {
     try {
       list.setText(index, input.value, { quiet: true });
@@ -460,7 +457,7 @@ function closeEditor() {
 /* 正在编辑的行随删除一起消失：不提交，直接丢弃（todo.pyw:953-964） */
 function discardEditor() {
   if (!S.edit) return;
-  dropEditor(S.edit);
+  dropEditor();
 }
 
 /* 点击编辑框以外的地方即结束编辑（todo.pyw:912-925）
@@ -569,318 +566,46 @@ function addPlus(row, i) {
   p.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (DND.on) { cleanupDrag(); return; }
-    hideMenu();
+    if (drag.isOn()) { drag.cleanup(); return; }
+    menu.hide();
     menuRow(i, e.clientX, e.clientY);
   });
   row.appendChild(p);
 }
 
-/* ---------- 拖动排序（0.4.0） ----------
-   起拖只认行右缘的小把手；pointer 自绘浮层 + 插入线（HTML5 DnD 在 WebView2 里不可靠）。
-   落点只有行间插入，且永远落在整块边界：待办带走整棵子树，分组带走整组。
-   搬行本身是 md.js 的纯函数（blockEnd / allowsTopSlot / canMove / moveBlock，26 项 TDD）。 */
-
-const GRIP_SVG = '<svg viewBox="0 0 8 14" fill="none">'
-  + '<circle cx="2" cy="3" r="1.1" fill="currentColor"/><circle cx="6" cy="3" r="1.1" fill="currentColor"/>'
-  + '<circle cx="2" cy="7" r="1.1" fill="currentColor"/><circle cx="6" cy="7" r="1.1" fill="currentColor"/>'
-  + '<circle cx="2" cy="11" r="1.1" fill="currentColor"/><circle cx="6" cy="11" r="1.1" fill="currentColor"/>'
-  + '</svg>';
+/* ---------- 拖动排序（0.4.0；0.4.2 收进 rowdrag.js） ----------
+   起拖只认行右缘的小把手；指针捕获、浮层、插入线、自动滚、落点求解都在 rowdrag.js，
+   这里只给把手接上主窗口的适配器（政策：能不能插进这个分组）。 */
 
 function addHandle(row, i) {
   const h = document.createElement('span');
   h.className = 'drag-handle';
   h.innerHTML = GRIP_SVG;
-  h.addEventListener('pointerdown', (e) => startDrag(e, i, h));
+  h.addEventListener('pointerdown', (e) => drag.start(e, h, i));
   // 把手上的右键仍然是这一行的菜单（不落到整行空白菜单）
   h.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (DND.on) { cleanupDrag(); return; }
-    hideMenu();
+    if (drag.isOn()) { drag.cleanup(); return; }
+    menu.hide();
     menuRow(i, e.clientX, e.clientY);
   });
   row.appendChild(h);
 }
 
-function startDrag(e, i, handle) {
-  if (e.button !== 0 || S.missingShown || !S.lines[i]) return;
-  e.preventDefault();          // 不夺焦点、不拖选文字
-  e.stopPropagation();
-  const x0 = e.clientX, y0 = e.clientY;
-  let live = false;
-  const onMove = (ev) => {
-    if (!live) {
-      if (Math.abs(ev.clientX - x0) < 3 && Math.abs(ev.clientY - y0) < 3) return;
-      live = beginDrag(i);
-      if (!live) { detach(); return; }
-    }
-    trackDrag(ev);
-  };
-  const onUp = (ev) => {
-    if (live) dropDrag(ev);
-    detach();
-  };
-  const onCancel = () => {
-    if (live) cleanupDrag();
-    detach();
-  };
-  function detach() {
-    handle.removeEventListener('pointermove', onMove);
-    handle.removeEventListener('pointerup', onUp);
-    handle.removeEventListener('pointercancel', onCancel);
-    try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* 行已重渲染 */ }
-  }
-  try { handle.setPointerCapture(e.pointerId); } catch (_) { return; }
-  handle.addEventListener('pointermove', onMove);
-  handle.addEventListener('pointerup', onUp);
-  handle.addEventListener('pointercancel', onCancel);
-}
-
-function beginDrag(i) {
-  closeEditor();                 // 静默提交，不重渲染（重渲染会换掉把手）
-  const ln = S.lines[i];
-  if (!ln) return false;
-  DND.on = true;
-  DND.from = i;
-  DND.slot = -1;
-  DND.lines = S.lines;
-  const info = ROWS.get(i);
-  DND.srcEl = info ? info.row : null;
-  if (DND.srcEl) DND.srcEl.classList.add('drag-src');
-
-  const ghost = document.createElement('div');
-  ghost.className = 'drag-ghost' + (ln.kind === 'header' ? ' drag-ghost-header' : '');
-  const text = document.createElement('span');
-  text.className = 'drag-ghost-text';
-  text.textContent = ln.text || '（空）';
-  ghost.appendChild(text);
-  const [td, , nt] = ln.kind === 'todo' ? md.subtreeStats(S.lines, i) : [0, 0, 0];
-  if (td + nt) {
-    const cnt = document.createElement('span');
-    cnt.className = 'drag-ghost-count';
-    cnt.textContent = `+${td + nt}`;
-    ghost.appendChild(cnt);
-  }
-  if (DND.srcEl) ghost.style.width = `${Math.round(DND.srcEl.getBoundingClientRect().width)}px`;
-
-  const line = document.createElement('div');
-  line.className = 'drop-line';
-  line.style.display = 'none';
-  document.body.appendChild(ghost);
-  document.body.appendChild(line);
-  DND.ghost = ghost;
-  DND.line = line;
-  DND.ghostH = ghost.getBoundingClientRect().height;
-  document.body.classList.add('dragging');
-  return true;
-}
-
-function trackDrag(ev) {
-  if (!DND.on) return;
-  if (S.lines !== DND.lines) { cleanupDrag(); return; }   // 文件被外部改过：放弃
-  DND.lastY = ev.clientY;
-  if (DND.ghost) {
-    DND.ghost.style.left = `${ev.clientX + 16}px`;
-    DND.ghost.style.top = `${ev.clientY - Math.max(DND.ghostH / 2, 12)}px`;
-  }
-  DND.edge = edgeDir(ev.clientY);
-  if (DND.edge) startScrollPump(); else stopScrollPump();
-  refreshSlot();
-}
-
-/* 指针进到清单区上下 24px 内就算进入滚动区；按住不动也继续滚（每帧 12px）。
-   0.4.1：边界取 #list 的矩形而不是窗口。指针越过清单顶边（连标题栏那段）算"上边缘"——
-   拖动时想让列表往上翻，手不必停在带子里；标题栏的滚轮仍然不滚内容。 */
-function edgeDir(y) {
-  const r = listEl.getBoundingClientRect();
-  if (y < r.top + EDGE_SCROLL) return -1;
-  if (y > r.bottom - EDGE_SCROLL) return 1;
-  return 0;
-}
-
-function startScrollPump() {
-  if (DND.pump) return;
-  DND.pump = requestAnimationFrame(function tick() {
-    if (!DND.on || !DND.edge) { stopScrollPump(); return; }
-    listEl.scrollTop += EDGE_STEP * DND.edge;
-    refreshSlot();
-    DND.pump = requestAnimationFrame(tick);
-  });
-}
-
-function stopScrollPump() {
-  if (DND.pump) { cancelAnimationFrame(DND.pump); DND.pump = 0; }
-}
-
-function refreshSlot() {
-  DND.slot = slotAt(DND.lastY);
-  drawLine();
-}
-
-function drawLine() {
-  if (!DND.line) return;
-  const pos = DND.slot >= 0 ? slotPos(DND.slot) : null;
-  if (!pos) { DND.line.style.display = 'none'; return; }
-  DND.line.style.display = 'block';
-  DND.line.style.top = `${Math.round(pos.top - 1)}px`;
-  DND.line.style.left = `${Math.round(pos.left)}px`;
-  DND.line.style.width = `${Math.max(0, Math.round(pos.right - pos.left))}px`;
-}
-
-/* 指针高度 → 落点下标（插在这一行之前）。行间空白归上一行。
-   拖的是分组时只认组边界：上半落到本组之前，下半落到本组之后（= 下一组之前），
-   否则分组会插进别人组中间，把那一组的条目改归自己。 */
-function slotAt(y) {
-  if (!VIS.length) return -1;
-  if (y < VIS[0].el.getBoundingClientRect().top) return slotOK(VIS[0].i) ? VIS[0].i : -1;
-  let hit = -1, rect = null;
-  for (const v of VIS) {
-    const r = v.el.getBoundingClientRect();
-    if (y < r.top) break;
-    hit = v.i;
-    rect = r;
-  }
-  if (hit < 0) return -1;
-  const upper = y < rect.top + rect.height / 2;
-  let slot;
-  if (S.lines[DND.from].kind === 'header') {
-    const g = groupStart(hit);
-    if (g < 0) return -1;
-    slot = upper ? g : md.blockEnd(S.lines, g);
-  } else if (S.lines[hit].kind === 'header') {
-    slot = hit + 1;                       // 拖到组头 = 组首
-  } else {
-    slot = upper ? hit : md.blockEnd(S.lines, hit);
-  }
-  return slotOK(slot) ? slot : -1;
-}
-
-/* 这一行所属分组的标题下标；上面一个标题都没有时返回 -1。 */
-function groupStart(i) {
-  let k = i;
-  while (k > 0 && S.lines[k].kind !== 'header') k -= 1;
-  return S.lines[k].kind === 'header' ? k : -1;
-}
-
-function slotOK(slot) {
-  if (!(slot >= 0 && slot <= S.lines.length)) return false;
-  if (slot === 0 && !md.allowsTopSlot(S.lines)) return false;   // 第一组标题之前没有落点
-  return md.canMove(S.lines, DND.from, slot);
-}
-
-/* 落点的屏幕坐标：插入线从「下一可见行」的缩进位画到行右缘。 */
-function slotPos(slot) {
-  let next = null, prev = null;
-  for (const v of VIS) {
-    if (v.i < slot) prev = v;
-    else { next = v; break; }
-  }
-  if (next) {
-    const r = next.el.getBoundingClientRect();
-    return { top: r.top, left: labelLeft(next.el), right: r.right };
-  }
-  if (prev) {
-    const r = prev.el.getBoundingClientRect();
-    return { top: r.bottom, left: labelLeft(prev.el), right: r.right };
-  }
-  return null;
-}
-
-function labelLeft(row) {
-  const lbl = row.querySelector('.label');
-  return (lbl || row).getBoundingClientRect().left;
-}
-
-function dropDrag(ev) {
-  const inside = ev.clientX >= 0 && ev.clientY >= 0
-    && ev.clientX <= window.innerWidth && ev.clientY <= window.innerHeight;
-  const slot = DND.slot, from = DND.from;
-  const fresh = S.lines === DND.lines;   // 拖到一半文件被外部改过（轮询重载换了数组）就放弃
-  cleanupDrag();
-  if (!fresh || !inside || slot < 0) return;   // 拖出窗口或没有合法落点 = 取消，不写不记撤销
-  if (list.move(from, slot)) log(`drag move ${from} -> ${slot}`);
-}
-
-function cleanupDrag() {
-  stopScrollPump();
-  if (DND.ghost) DND.ghost.remove();
-  if (DND.line) DND.line.remove();
-  if (DND.srcEl) DND.srcEl.classList.remove('drag-src');
-  document.body.classList.remove('dragging');
-  DND.on = false;
-  DND.from = -1;
-  DND.slot = -1;
-  DND.lastY = 0;
-  DND.edge = 0;
-  DND.lines = null;
-  DND.ghost = null;
-  DND.line = null;
-  DND.srcEl = null;
-  DND.ghostH = 0;
-}
-
 /* ---------- 自绘菜单（右键菜单 + 顶栏文件下拉，todo.pyw:1041-1072, 1463-1486） ---------- */
 
-/* 菜单归属：下拉菜单要能「再点同一枚按钮收起」，而点别处照样关。
-   捕获期的「点菜单外关闭」跑在 click 之前，所以这里给 owner 开个豁免：
-   指针落回 owner 上时不关，留给 click 去 toggle（见 toggleFileMenu）。 */
-let menuOwner = null;
-
-/* 归属按钮：置亮（和 📌 同款“这枚按钮现在是开着的”），并让捕获期的“点菜单外关闭”放过它，
-   交给 click 去 toggle。 */
-function setMenuOwner(btn) {
-  menuOwner = btn;
-  if (btn) btn.classList.add('lit');
-}
-
-function showMenu(items, x, y) {
-  menuEl.textContent = '';
-  for (const it of items) {
-    if (it === 'sep') {
-      const sep = document.createElement('div');
-      sep.className = 'menu-sep';
-      menuEl.appendChild(sep);
-      continue;
-    }
-    const el = document.createElement('div');
-    el.className = 'menu-item' + (it.disabled ? ' disabled' : '');
-    el.textContent = it.label;
-    if (it.disabled) {
-      // 置灰项只是个占位说明：点了不动作，菜单也不关（ADR 0007）
-      el.addEventListener('click', (e) => { e.stopPropagation(); });
-    } else {
-      el.addEventListener('click', () => { hideMenu(); it.fn(); });
-    }
-    menuEl.appendChild(el);
-  }
-  menuEl.style.display = 'block';
-  const rect = menuEl.getBoundingClientRect();
-  const maxX = window.innerWidth - rect.width - 2;
-  const maxY = window.innerHeight - rect.height - 2;
-  menuEl.style.left = `${Math.max(0, Math.min(x, maxX))}px`;
-  menuEl.style.top = `${Math.max(0, Math.min(y, maxY))}px`;
-}
-
-function menuOpen() { return menuEl.style.display === 'block'; }
-
-function hideMenu() {
-  menuEl.style.display = 'none';
-  if (menuOwner) { menuOwner.classList.remove('lit'); menuOwner = null; }
-}
-
 /* 顶栏文件菜单（0.4.2）：「更换文件…」与「新建待办文件…」两枚常驻图标合并成一枚下拉。
-   单击展开、再单击收起；锚在按钮左下角，溢出时由 showMenu 夹回窗口内。
+   单击展开、再单击收起；锚在按钮左下角，溢出时由共享菜单夹回窗口内。
    两项都走原生对话框，所以文案带省略号。 */
 function toggleFileMenu() {
   const btn = $('btn-file');
-  if (menuOpen()) { hideMenu(); return; }
+  if (menu.isOpen()) { menu.hide(); return; }
   const r = btn.getBoundingClientRect();
-  showMenu([
+  menu.show([
     { label: '打开文件…', fn: chooseFile },
     { label: '新建文件…', fn: newFile },
-  ], r.left, r.bottom + 2);
-  setMenuOwner(btn);
+  ], r.left, r.bottom + 2, { owner: btn });
 }
 
 function menuRow(i, x, y) {
@@ -901,13 +626,13 @@ function menuRow(i, x, y) {
     // blank / other / note：主窗口不给它们开菜单（备注只活在详情面板里，见 renderList 的跳过）
     return;
   }
-  showMenu(items, x, y);
+  menu.show(items, x, y);
 }
 
 function menuBlank(x, y) {
   // 空白处只剩这一项；退出交给顶栏的 ✕。文件缺失时没有可写的目标（加了会隐式建一个
   // 只有分组的新文件，绕过 ＋ 的示例内容），所以这一项置灰说明，而不是消失。
-  showMenu([{
+  menu.show([{
     label: '在末尾添加分组',
     disabled: S.missingShown || !S.loaded,
     fn: () => insertGroup(S.lines.length - 1),
@@ -1265,28 +990,28 @@ function bindChrome() {
       e.preventDefault();
       undoNow();
     } else if (e.key === 'Escape') {
-      if (DND.on) { e.preventDefault(); cleanupDrag(); return; }   // 0.4.0：Esc 取消拖动
-      hideMenu();
+      if (drag.isOn()) { e.preventDefault(); drag.cleanup(); return; }   // 0.4.0：Esc 取消拖动
+      menu.hide();
     }
   });
   // 拖动中右键 = 取消（捕获阶段，顺手吞掉这一下的行菜单）
   document.addEventListener('contextmenu', (e) => {
-    if (!DND.on) return;
+    if (!drag.isOn()) return;
     e.preventDefault();
     e.stopPropagation();
-    cleanupDrag();
+    drag.cleanup();
   }, true);
   // 点窗口内别处关闭菜单（捕获期 + pointerdown）。用 pointerdown 而不是 mousedown：
   // 标题栏的拖动区（data-tauri-drag-region）上，Tauri 注入的 drag.js 会吞掉 mousedown
   // （见上个注释块），而 pointerdown 比它早，标题栏空白处也关得掉（0.4.2 用户要求）。
   // 落在菜单自己或菜单归属的那枚按钮上时不关：后者留给 click 去 toggle。
   window.addEventListener('pointerdown', (e) => {
-    if (!menuOpen() || menuEl.contains(e.target)) return;
-    if (menuOwner && menuOwner.contains(e.target)) return;
-    hideMenu();
+    if (!menu.isOpen() || menuEl.contains(e.target)) return;
+    if (menu.owns(e.target)) return;
+    menu.hide();
   }, true);
   // 失焦（点到详情面板、别的程序）也收起：下拉菜单挂在那儿等人回来是错的
-  window.addEventListener('blur', hideMenu);
+  window.addEventListener('blur', () => menu.hide());
 }
 
 /* ---------- 启动 ---------- */

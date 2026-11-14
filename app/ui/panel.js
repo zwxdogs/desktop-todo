@@ -8,6 +8,9 @@
 
 import { attachScrollbar } from './scrollbar.js';
 import { plusButton } from './plus.js';
+import { createRowDrag, panelDropTarget, GRIP_SVG } from './rowdrag.js';
+import { createMenu } from './rowmenu.js';
+import { openRowEdit } from './rowedit.js';
 
 /* __TAURI__ 由注入脚本在页面加载后写入，panel.js 可能先于它执行（与 app.js 早期同类竞态）。
    因此所有 IPC 都等就绪后再发；就绪前产生的请求排队，就绪后补发。 */
@@ -36,7 +39,7 @@ const scrollNotes = attachScrollbar(paneNote);
 
 const P = {
   data: null,          // 最近一次 panel-data
-  edit: null,          // { j, input, label }
+  edit: null,          // { j, input, handle }
   renaming: false,
 };
 
@@ -68,7 +71,7 @@ function commitPending() {
 
 function pMenu(j, x, y) {
   // Tk p_menu(1422-1433)：子待办是叶子，只有编辑与删除
-  showMenu([
+  menu.show([
     { label: '编辑', fn: () => pEdit(j) },
     { label: '删除', fn: () => {
         // Tk delete_line 前会 _commit_edits：先提交未定稿编辑再删
@@ -114,44 +117,48 @@ function buildRow(container, item, isTodo) {
   return lbl;
 }
 
-/* ---------- 拖动排序（0.4.0）----------
+/* ---------- 拖动排序（0.4.0；0.4.2 收进 rowdrag.js）----------
    两栏各自排序：子待办只与子待办换位，备注只与备注换位（跨栏不合法）。
-   本地只画浮层与插入线，落定后把「从哪行搬到哪行之前/之后」回传主窗口，
-   由拥有 S.lines 的主窗口用 md.moveBlock 真正搬行。 */
+   这里每栏一个适配器（政策：跨栏算不算同一个落点）；指针、浮层、插入线、自动滚、
+   落点求解都在 rowdrag.js，落定后把「从哪行搬到哪行之前/之后」回传主窗口执行。 */
 
-const GRIP_SVG = '<svg viewBox="0 0 8 14" fill="none">'
-  + '<circle cx="2" cy="3" r="1.1" fill="currentColor"/><circle cx="6" cy="3" r="1.1" fill="currentColor"/>'
-  + '<circle cx="2" cy="7" r="1.1" fill="currentColor"/><circle cx="6" cy="7" r="1.1" fill="currentColor"/>'
-  + '<circle cx="2" cy="11" r="1.1" fill="currentColor"/><circle cx="6" cy="11" r="1.1" fill="currentColor"/>'
-  + '</svg>';
+function paneRows(pane) {
+  return [...pane.querySelectorAll('.row')].map((el) => ({ key: Number(el.dataset.j), el }));
+}
 
-const EDGE_SCROLL = 24;  // 指针进到本栏上下这么多像素内就开始自动滚动
-const EDGE_STEP = 12;    // 自动滚动每帧滚多少像素
+function makePaneDrag(pane) {
+  return createRowDrag({
+    container: pane,
+    rows: () => paneRows(pane),
+    canStart: () => !P.edit && !P.renaming && !!P.data,
+    ghost: (j) => {
+      const row = paneRows(pane).find((r) => r.key === j);
+      const lbl = row && row.el.querySelector('.label');
+      return { text: lbl ? lbl.textContent.replace(/^• /, '') : '' };
+    },
+    resolve: (rows, y) => panelDropTarget(rows, pane.getBoundingClientRect(), y),
+    lineRight: () => window.innerWidth - 8,
+    onDrop: (from, target) => emitReq({ type: 'move', from, anchor: target.rowKey, where: target.where }),
+  });
+}
 
-const DND = {
-  on: false,
-  j: -1,
-  pane: null,
-  slot: null,      // { anchor, where: 'before'|'after', el }
-  lastY: 0,
-  edge: 0,
-  pump: 0,
-  ghost: null,
-  line: null,
-  srcEl: null,
-  ghostH: 0,
-};
+const dragTodo = makePaneDrag(paneTodo);
+const dragNote = makePaneDrag(paneNote);
+const dragFor = (pane) => (pane === paneTodo ? dragTodo : dragNote);
+function anyDragOn() { return dragTodo.isOn() || dragNote.isOn(); }
+function cleanupDrags() { dragTodo.cleanup(); dragNote.cleanup(); }
 
 function addHandle(row, j, pane) {
   const h = document.createElement('span');
   h.className = 'drag-handle';
   h.innerHTML = GRIP_SVG;
-  h.addEventListener('pointerdown', (e) => startDrag(e, j, pane, h));
+  const drag = dragFor(pane);
+  h.addEventListener('pointerdown', (e) => drag.start(e, h, j));
   h.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (DND.on) { cleanupDrag(); return; }
-    hideMenu();
+    if (drag.isOn()) { drag.cleanup(); return; }
+    menu.hide();
     pMenu(j, e.clientX, e.clientY);
   });
   row.appendChild(h);
@@ -169,189 +176,17 @@ function addPlus(row, j, kind) {
   p.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (DND.on) { cleanupDrag(); return; }
-    hideMenu();
+    if (anyDragOn()) { cleanupDrags(); return; }
+    menu.hide();
     pMenu(j, e.clientX, e.clientY);
   });
   row.appendChild(p);
 }
 
-function startDrag(e, j, pane, handle) {
-  if (e.button !== 0 || P.edit || P.renaming || !P.data) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const x0 = e.clientX, y0 = e.clientY;
-  let live = false;
-  const onMove = (ev) => {
-    if (!live) {
-      if (Math.abs(ev.clientX - x0) < 3 && Math.abs(ev.clientY - y0) < 3) return;
-      live = beginDrag(j, pane);
-      if (!live) { detach(); return; }
-    }
-    trackDrag(ev);
-  };
-  const onUp = (ev) => {
-    if (live) dropDrag(ev);
-    detach();
-  };
-  const onCancel = () => {
-    if (live) cleanupDrag();
-    detach();
-  };
-  function detach() {
-    handle.removeEventListener('pointermove', onMove);
-    handle.removeEventListener('pointerup', onUp);
-    handle.removeEventListener('pointercancel', onCancel);
-    try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* 行已重渲染 */ }
-  }
-  try { handle.setPointerCapture(e.pointerId); } catch (_) { return; }
-  handle.addEventListener('pointermove', onMove);
-  handle.addEventListener('pointerup', onUp);
-  handle.addEventListener('pointercancel', onCancel);
-}
-
-function beginDrag(j, pane) {
-  const row = [...pane.querySelectorAll('.row')].find((r) => Number(r.dataset.j) === j);
-  if (!row) return false;
-  DND.on = true;
-  DND.j = j;
-  DND.pane = pane;
-  DND.slot = null;
-  DND.srcEl = row;
-  row.classList.add('drag-src');
-
-  const ghost = document.createElement('div');
-  ghost.className = 'drag-ghost';
-  const text = document.createElement('span');
-  text.className = 'drag-ghost-text';
-  const lbl = row.querySelector('.label');
-  text.textContent = lbl ? lbl.textContent.replace(/^• /, '') : '';
-  ghost.appendChild(text);
-  ghost.style.width = `${Math.round(row.getBoundingClientRect().width)}px`;
-
-  const line = document.createElement('div');
-  line.className = 'drop-line';
-  line.style.display = 'none';
-  document.body.appendChild(ghost);
-  document.body.appendChild(line);
-  DND.ghost = ghost;
-  DND.line = line;
-  DND.ghostH = ghost.getBoundingClientRect().height;
-  document.body.classList.add('dragging');
-  return true;
-}
-
-function trackDrag(ev) {
-  if (!DND.on) return;
-  DND.lastY = ev.clientY;
-  if (DND.ghost) {
-    DND.ghost.style.left = `${ev.clientX + 16}px`;
-    DND.ghost.style.top = `${ev.clientY - Math.max(DND.ghostH / 2, 12)}px`;
-  }
-  DND.edge = edgeDir(ev.clientY);
-  if (DND.edge) startScrollPump(); else stopScrollPump();
-  refreshSlot();
-}
-
-/* 指针停进本栏上下 24px 就算进入滚动区；按住不动也继续滚（每帧 12px）。 */
-function edgeDir(y) {
-  if (!DND.pane) return 0;
-  const r = DND.pane.getBoundingClientRect();
-  if (y < r.top + EDGE_SCROLL) return -1;
-  if (y > r.bottom - EDGE_SCROLL) return 1;
-  return 0;
-}
-
-function startScrollPump() {
-  if (DND.pump) return;
-  DND.pump = requestAnimationFrame(function tick() {
-    if (!DND.on || !DND.edge) { stopScrollPump(); return; }
-    DND.pane.scrollTop += EDGE_STEP * DND.edge;
-    refreshSlot();
-    DND.pump = requestAnimationFrame(tick);
-  });
-}
-
-function stopScrollPump() {
-  if (DND.pump) { cancelAnimationFrame(DND.pump); DND.pump = 0; }
-}
-
-function refreshSlot() {
-  DND.slot = slotAt(DND.lastY);
-  drawLine();
-}
-
-function drawLine() {
-  if (!DND.line) return;
-  const slot = DND.slot;
-  if (!slot) { DND.line.style.display = 'none'; return; }
-  const r = slot.el.getBoundingClientRect();
-  const lbl = slot.el.querySelector('.label');
-  const left = (lbl || slot.el).getBoundingClientRect().left;
-  DND.line.style.display = 'block';
-  DND.line.style.top = `${Math.round((slot.where === 'before' ? r.top : r.bottom) - 1)}px`;
-  DND.line.style.left = `${Math.round(left)}px`;
-  DND.line.style.width = `${Math.max(0, Math.round(window.innerWidth - left - 8))}px`;
-}
-
-/* 指针高度 → 落点：只认本栏内的行，上半 = 之前，下半 = 之后。
-   指针移出本栏（比如从子待办栏拖到备注栏）就没有落点：跨栏不合法。 */
-function slotAt(y) {
-  if (!DND.pane) return null;
-  const pr = DND.pane.getBoundingClientRect();
-  if (y < pr.top || y > pr.bottom) return null;
-  const rows = [...DND.pane.querySelectorAll('.row')];
-  if (!rows.length) return null;
-  if (y < rows[0].getBoundingClientRect().top) {
-    return { anchor: Number(rows[0].dataset.j), where: 'before', el: rows[0] };
-  }
-  let hit = null, rect = null;
-  for (const r of rows) {
-    const rr = r.getBoundingClientRect();
-    if (y < rr.top) break;
-    hit = r;
-    rect = rr;
-  }
-  if (!hit) return null;
-  return {
-    anchor: Number(hit.dataset.j),
-    where: y < rect.top + rect.height / 2 ? 'before' : 'after',
-    el: hit,
-  };
-}
-
-function dropDrag(ev) {
-  const inside = ev.clientX >= 0 && ev.clientY >= 0
-    && ev.clientX <= window.innerWidth && ev.clientY <= window.innerHeight;
-  const slot = DND.slot;
-  const from = DND.j;
-  cleanupDrag();
-  if (!inside || !slot) return;
-  emitReq({ type: 'move', from, anchor: slot.anchor, where: slot.where });
-}
-
-function cleanupDrag() {
-  stopScrollPump();
-  if (DND.ghost) DND.ghost.remove();
-  if (DND.line) DND.line.remove();
-  if (DND.srcEl) DND.srcEl.classList.remove('drag-src');
-  document.body.classList.remove('dragging');
-  DND.on = false;
-  DND.j = -1;
-  DND.pane = null;
-  DND.slot = null;
-  DND.lastY = 0;
-  DND.edge = 0;
-  DND.ghost = null;
-  DND.line = null;
-  DND.srcEl = null;
-  DND.ghostH = 0;
-}
-
 /* ---------- 渲染（Tk render_panel 1225-1261） ---------- */
 
 function render(d) {
-  if (DND.on) cleanupDrag();   // 数据被重推（行要重建）时先收掉拖动浮层
+  if (anyDragOn()) cleanupDrags();   // 数据被重推（行要重建）时先收掉拖动浮层
   const s1 = paneTodo.scrollTop;
   const s2 = paneNote.scrollTop;
   titleEl.textContent = d.title;
@@ -386,45 +221,26 @@ function pEditAt(lbl, j) {
   if (P.edit || P.renaming) return;
   const idx = j !== undefined ? j : labelIndex(lbl);
   if (idx == null) return;
-  const input = document.createElement('input');
-  input.className = 'row-edit' + (lbl.classList.contains('done') ? ' done' : '');
-  input.value = lbl.textContent.replace(/^• /, '');
-  lbl.style.display = 'none';
-  lbl.parentNode.classList.add('editing');   // 编辑中把加号和把手收起来（CSS 只管显隐）
-  lbl.parentNode.insertBefore(input, lbl.nextSibling);
-  input.select();
-  input.focus();
-  P.edit = { j: idx, input, label: lbl };
-  setEditing(true);
-
-  input.addEventListener('keydown', (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      e.stopPropagation();   // Tk return "break"：别冒泡成面板级 Escape
-      const v = input.value;
+  const handle = openRowEdit({
+    label: lbl,
+    text: lbl.textContent.replace(/^• /, ''),
+    done: lbl.classList.contains('done'),
+    onFinish: (v) => {
+      if (!P.edit || P.edit.handle !== handle) return;
       const jj = P.edit.j;
       teardownEdit();
       commitEdit(jj, v);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
+    },
+    onCancel: () => {
+      if (!P.edit || P.edit.handle !== handle) return;
       const jj = P.edit.j;
       teardownEdit();
       emitReq({ type: 'edit-cancel', j: jj });
       emitReq({ type: 'edit-state', editing: false });
-    }
+    },
   });
-  input.addEventListener('blur', () => {
-    // FocusOut → commit（Tk 1347）
-    if (P.edit && P.edit.input === input) {
-      const v = input.value;
-      const jj = P.edit.j;
-      teardownEdit();
-      commitEdit(jj, v);
-    }
-  });
-  input.addEventListener('compositionend', () => input.focus());
+  P.edit = { j: idx, input: handle.input, handle };
+  setEditing(true);
 }
 
 function labelIndex(lbl) {
@@ -449,11 +265,9 @@ function findLabel(j) {
 
 function teardownEdit() {
   if (!P.edit) return;
-  const { input, label } = P.edit;
+  const { handle } = P.edit;
   P.edit = null;
-  input.remove();
-  label.style.display = '';
-  label.parentNode.classList.remove('editing');
+  handle.teardown();
 }
 
 function commitEdit(j, value) {
@@ -509,25 +323,10 @@ titleEdit.addEventListener('compositionend', () => titleEdit.focus());
 /* ---------- 菜单 ---------- */
 
 const menuEl = $('menu');
-function showMenu(items, x, y) {
-  menuEl.textContent = '';
-  for (const it of items) {
-    if (it === 'sep') continue;
-    const el = document.createElement('div');
-    el.className = 'menu-item';
-    el.textContent = it.label;
-    el.addEventListener('click', () => { hideMenu(); it.fn(); });
-    menuEl.appendChild(el);
-  }
-  menuEl.style.display = 'block';
-  const rect = menuEl.getBoundingClientRect();
-  menuEl.style.left = `${Math.max(0, Math.min(x, window.innerWidth - rect.width - 2))}px`;
-  menuEl.style.top = `${Math.max(0, Math.min(y, window.innerHeight - rect.height - 2))}px`;
-}
-function hideMenu() { menuEl.style.display = 'none'; }
+const menu = createMenu(menuEl);
 // 与主窗口一致用捕获阶段：拖动区处理在 document 冒泡期吞掉事件（#4；本窗口暂无拖动区，防复制粘贴）
 document.addEventListener('mousedown', (e) => {
-  if (!menuEl.contains(e.target)) hideMenu();
+  if (!menuEl.contains(e.target)) menu.hide();
 }, true);
 document.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -546,17 +345,17 @@ $('hdr').addEventListener('contextmenu', (e) => { e.preventDefault(); });
 /* Escape：先取消拖动，其次取消编辑/改名，否则关面板（Tk 1120 + 各 Entry 的 "break"） */
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (DND.on) { e.preventDefault(); cleanupDrag(); return; }
+  if (anyDragOn()) { e.preventDefault(); cleanupDrags(); return; }
   if (P.edit || P.renaming) return;   // 编辑框自己的 handler 处理并 stopPropagation
   emitReq({ type: 'close' });
 });
 
 /* 拖动中右键 = 取消（捕获阶段，顺手吞掉这一下的行菜单） */
 document.addEventListener('contextmenu', (e) => {
-  if (!DND.on) return;
+  if (!anyDragOn()) return;
   e.preventDefault();
   e.stopPropagation();
-  cleanupDrag();
+  cleanupDrags();
 }, true);
 
 /* ---------- 事件 ---------- */
@@ -596,7 +395,7 @@ function onPanelCommit() {
 
 function onPanelHide() {
   // 面板被收起：清本地编辑态（Tk close_panel 清空状态）
-  if (P.edit) { P.edit.input.remove(); P.edit = null; }
+  if (P.edit) teardownEdit();
   if (P.renaming) teardownRename();
   setEditing(false);
 }
