@@ -18,6 +18,10 @@ import { openRowEdit } from './rowedit.js';
 import { connect, MAIN, requireHost } from './panelproto.js';
 import { nextNotice, noticeAction } from './notice.js';
 import {
+  hasUnflushed, conflictPlan, nextConflict, isConflictOpen, conflictText, conflictFailText,
+} from './extconflict.js';
+import { fileNameOf } from './readfail.js';
+import {
   classifyReadError, loadFailure, canWriteList, loadNoticeText,
 } from './readfail.js';
 
@@ -196,6 +200,14 @@ async function writeText(content) {
     log('write blocked: 清单未装载成功，拒绝写盘（#21）');
     throw new Error('清单没有装载成功，这次改动不会写进文件');
   }
+  // 外部改动冲突弹层还开着（#22）：此刻磁盘上是**外部那份**，用户还没选「刷新 / 撤回」。
+  // 任何一条把它写回去的路都会让外部改动凭空消失（撤回要留档的那份就没了），
+  // 所以闸门也放在这里，而不只靠「按住 250ms 合并窗口」——撤销、删除已完成这些
+  // 路径是直接写盘的，不经过那个窗口（与 #21 把闸门放在同一处是同一条理由）。
+  if (conflictState) {
+    log('write blocked: 外部改动冲突还没选（#22）');
+    throw new Error('先选「刷新」或「撤回」，之后才能写盘');
+  }
   try {
     await invoke('write_md', { file: S.file, content, hasBom: list.hasBom() });
     S.lastSeen = await statNow();
@@ -247,6 +259,9 @@ function listBefore(change) {
 async function undoNow() {
   hideToast();   // 回执只认「刚删完」那一刻：换了撤销目标就先收掉
   if (S.edit || S.panelEditing) return;
+  // 外部改动冲突弹层还开着：此刻磁盘上是外部那份，撤销要先写盘才能换内存——
+  // 写了就是替用户选了「撤回」，而他那两个选择还没做（#22）。快照留在栈里不动。
+  if (conflictState) { log('undo blocked: 外部改动冲突还没选（#22）'); return; }
   if (list.canUndo()) {
     if (await list.undo()) log(`undo (left ${list.undoSize()} snapshots)`);
     else log('undo save failed');
@@ -335,7 +350,12 @@ function clearLoadFailure() {
 }
 
 async function loadFile() {
-  // 外部改动重载：丢弃尚未落盘的旧内存状态（Tk load_file 同样直接重读，不回写）
+  // 外部改动重载：丢弃尚未落盘的旧内存状态（Tk load_file 同样直接重读，不回写）。
+  // 走到这里 = 「刷新」已被选中，或者内存里本来就没有未落盘的改动 —— 写盘该恢复常态，
+  // 否则弹层关掉之后自动保存会一直按着、用户以为在保存其实一笔都没落（#22）。
+  list.release();
+  conflictState = null;
+  paintConflict();
   list.cancelSave();
   if (!(await fileStateExists())) {
     showMissing();
@@ -909,6 +929,168 @@ function noticeClick() {
   else if (action === 'retry-load') retryLoad();
 }
 
+/* ---------- 外部改动冲突弹层（#22） ----------
+   判定在 extconflict.js（纯函数、有测试）：这里只负责把状态画出来、接两个按钮。
+   为什么需要它：轮询发现文件变了就 `loadFile()`，而它开头是 `list.cancelSave()` ——
+   250ms 写盘窗口里还没落盘的那几笔直接丢，撤销栈也被整份重载清空。单机少见，
+   上同步盘（Obsidian 同步、另一台机器推送）就是日常。
+
+   政策是维护者拍的板（票 #22）：**只在有未落盘改动时才弹**。没有就照旧静默重载
+   ——那时内存与磁盘没有差别，刷新本来就无感，而同步盘可能每分钟写一次，每次都弹
+   就是弹窗地狱。「撤回」整份覆盖、不做合并：Markdown 待办清单没有可靠的合并语义。 */
+const conflictEl = $('conflict');
+let conflictState = null;   // 形状与迁移全在 extconflict.js：null | { kind: 'conflict', reason? }
+
+function paintConflict() {
+  if (!conflictEl) return;
+  const s = conflictState;
+  const wasOpen = conflictEl.classList.contains('show');
+  conflictEl.classList.toggle('show', !!s);
+  const reasonEl = $('conflict-reason');
+  if (reasonEl) {
+    const reason = s && s.reason;
+    reasonEl.textContent = reason ? conflictFailText(reason) : '';
+    reasonEl.classList.toggle('show', !!reason);
+  }
+  // 只在弹层刚打开时搬焦点：每次重绘都 focus 会把用户刚用 Tab 挪走的焦点抢回来
+  if (s && !wasOpen) {
+    // 键盘用户落在「撤回」上（保住字的那一个是主要动作），Tab 能到「刷新」
+    const revert = $('conflict-revert');
+    if (revert) revert.focus();
+  }
+}
+
+function setConflict(ev) {
+  conflictState = nextConflict(conflictState, ev);
+  paintConflict();
+}
+
+/* 外部改动落到界面上的唯一入口：先判断有没有字可丢，再决定是弹还是静默重载。
+
+   **判定要用落定之前的状态，按住要早于任何 await。** 两步的顺序是这条路的正确性：
+   1. 先按**落定之前**的三个来源判定有没有未落盘的东西。落定会把 `S.edit` 清零、
+      把字变成一次排着的写盘，落定之后再问就永远只剩 `list.pending()` 一条了。
+   2. 要弹就**先** `list.hold()`，再 `flushPanel()` / `closeEditor()`。`flushPanel` 是
+      跨窗口往返，这期间一次**早就排好**的 250ms 写盘可能正好到点：那一笔落下去就把
+      磁盘上的外部内容盖掉了，接下来的「撤回」会拿用户自己的字去当外部那份留档。
+      先按住就不存在这个窗口。 */
+async function externalChanged() {
+  if (isConflictOpen(conflictState)) {
+    log('external change during conflict prompt: held');
+    return;
+  }
+  // 缺失态 / 没装载成功：内存里没有「用户此刻看到的清单」可言，没有字可丢，
+  // 也没有「刷新还是撤回」可问——直接走常规重载（#21 的读失败重试也在这条路上：
+  // 用户把编码改好、或关掉占用它的程序，mtime 一变就自动读回来）。
+  if (S.missingShown || !listReady()) {
+    await loadFile();
+    return;
+  }
+  const hasLocal = hasUnflushed({
+    pending: list.pending(),
+    editing: !!S.edit,
+    panelEditing: S.panelEditing,
+  });
+  if (conflictPlan(conflictState, { hasLocal }) === 'reload') {
+    log('external change -> silent reload');
+    await loadFile();
+    return;
+  }
+  list.hold();                    // 先按住写盘，再做任何 await：外部那份必须还在盘上
+  log('external change with unflushed local edits -> ask');
+  // 弹层出现之前把当前编辑落定：这一刻之后内存里就是「用户此刻看到的东西」
+  if (S.panelEditing) await flushPanel();
+  closeEditor();
+  setConflictText();
+  setConflict({ type: 'external', hasLocal });
+}
+
+/* 弹层的文案里要带当前文件名（不写死「待办.md」：清单可能叫 检查清单.md）。 */
+function setConflictText() {
+  const t = $('conflict-text');
+  if (t) t.textContent = conflictText(fileNameOf(S.file));
+}
+
+/* 刷新 = 丢弃内存，直接重读文件（弹层出现之前的行为）。 */
+async function conflictRefresh() {
+  if (!conflictState) return;
+  log('conflict: refresh (discard memory and reload)');
+  setConflict({ type: 'refresh' });
+  list.release();
+  await loadFile();
+}
+
+/* 撤回 = 先把磁盘上那份外部内容原子写进同目录的 -out-bak，**成功之后**再把内存内容
+   整份写回原文件。顺序就是这条路的全部正确性：写备份失败时绝不覆盖源文件，
+   否则外部改动凭空消失、备份也没落地（票 #22 的硬性要求）。
+
+   弹层里点「撤回」与「退出时弹层还开着」走的是同一趟（`archiveAndWriteBack`），
+   收在一处：两种入口对「外部那份必须留档、留不下就不写」的要求完全相同。
+
+   失败时弹层留着并挂上原因：用户此刻还能改选「刷新」，关掉弹层等于替他选了「刷新」。 */
+async function archiveAndWriteBack() {
+  return invoke('revert_md_external', {
+    file: S.file,
+    content: list.text(),
+    hasBom: list.hasBom(),
+  });
+}
+
+async function conflictRevert() {
+  if (!conflictState) return;
+  if (!listReady()) {
+    setConflict({ type: 'failed', reason: '清单没有装载成功，这次改动不可能写进文件' });
+    return;
+  }
+  log('conflict: revert (archive external version, then write memory back)');
+  let res;
+  try {
+    res = await archiveAndWriteBack();
+  } catch (e) {
+    log(`revert failed: ${e}`);
+    // 原文件一个字节没动（Rust 的顺序保证），弹层留着让用户改选「刷新」
+    setConflict({ type: 'failed', reason: String((e && e.message) || e) });
+    return;
+  }
+  setConflict({ type: 'revert' });
+  list.release();                 // 撤回落完盘：之后照常自动保存
+  if (res && res.backup) log(`external archived to ${res.backup}`);
+  showInfoNotice('外部改动已存进同目录的 -out-bak 备份，文件恢复成你看到的版本');
+  // 自己刚写下去的那一份：记下 mtime，否则下一轮轮询会把它当外部改动再弹一次
+  S.lastSeen = await statNow();
+}
+
+/* 绑定与文案：两个按钮的字、遮罩点击、Tab 焦点。
+   Esc 不接：两个按钮是这条路仅有的两个出口，Esc 该等于哪一个都不对
+   （等于「刷新」会丢字，等于「撤回」会替你改文件）。
+   点遮罩也不关（点空白等于「刷新」同样是替用户做决定），只把焦点收回卡面。 */
+function bindConflict() {
+  const title = $('conflict-title');
+  if (title) title.textContent = '文件被外部改过了';
+  const refresh = $('conflict-refresh');
+  const revert = $('conflict-revert');
+  if (refresh) refresh.textContent = '刷新';
+  if (revert) revert.textContent = '撤回';
+  if (!conflictEl) return;
+  if (refresh) refresh.addEventListener('click', conflictRefresh);
+  if (revert) revert.addEventListener('click', conflictRevert);
+  conflictEl.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+    // 点在遮罩（而不是卡面）上：焦点收回主要动作，别让它丢到后面的清单里
+    if (e.target === conflictEl && revert) revert.focus();
+  });
+  conflictEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+  conflictEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const order = [revert, refresh].filter(Boolean);
+    if (!order.length) return;
+    const at = order.indexOf(document.activeElement);
+    const next = e.shiftKey ? at - 1 : at + 1;
+    e.preventDefault();
+    order[(next + order.length) % order.length].focus();
+  });
+}
+
 /* ---------- 详情面板（todo.pyw:1074-1261；#16 起跨窗只走 panelproto.js） ----------
    这里只回答「面板的每个操作在清单上是什么」以及「面板该看到哪些行」。
    消息名、方向、字段、握手与落定都在协议模块里，两边共用同一张表。 */
@@ -1148,8 +1330,10 @@ async function pollTick() {
         S.lastSeen = null;
       } else if (cur !== S.lastSeen) {
         S.lastSeen = cur;
-        log('external change -> reload');
-        await loadFile();
+        log('external change detected');
+        // 有未落盘改动就弹层问「刷新 / 撤回」，没有就静默重载（#22）。
+        // 弹层还开着时这里直接按住：既不再弹一次，也不偷偷重载。
+        await externalChanged();
       }
     }
   } catch (e) {
@@ -1164,6 +1348,26 @@ async function exitApp() {
   if (S.quitting) return;
   S.quitting = true;
   try {
+    // 弹层还开着就退出：内存里那份没落盘，而磁盘上是外部那份。退出时若直接写，
+    // 外部改动就悄悄没了、备份也没落地——所以照「撤回」那套走一趟（先留档再写回）。
+    // 留档失败就什么都不写：让文件停在外部那份上，那是唯一确定没丢掉的东西。
+    if (conflictState) {
+      try {
+        await archiveAndWriteBack();
+        log('exit: conflict open, external version archived before the final write');
+      } catch (e) {
+        log(`exit: conflict open, revert failed -> no write (${e})`);
+        conflictState = null;
+        paintConflict();
+        list.release();
+        log('exit');
+        invoke('exit_app');
+        return;
+      }
+      conflictState = null;
+      paintConflict();
+      list.release();
+    }
     // 面板里没落定的编辑先交回清单，再写盘退出。回执没到就照常退——
     // 面板页已经答不上话了，干等只会让「关不掉」；但这一条要留下痕迹。
     if (!(await flushPanel())) log('exit: 面板落定回执没来，退出前可能有字没落盘');
@@ -1293,6 +1497,8 @@ function bindChrome() {
       // 清单不可写时这一次按键不接：撤销要先写盘，而读失败的当下内存里那份
       // 不是文件的内容——写回去就把它盖掉了（#21）。文件读得动之后照旧。
       if (!listReady()) return;
+      // 外部改动冲突还没选（#22）：撤销要写盘，写了就等于替用户选了「撤回」
+      if (conflictState) return;
       // 两个来源有一个能用就接过这次按键：光看栈会把「备份还能取回」那条路挡死
       if (!list.canUndo() && !list.canRestoreBackup()) return;
       if (S.edit || S.panelEditing) return;
@@ -1334,6 +1540,7 @@ async function boot() {
   updateDockButton();
 
   bindChrome();
+  bindConflict();
   /* 面板协议：装齐收消息的处理函数，再向面板 hello（两窗同一套）。
      面板页比主窗口晚建，它自己也会 hello；谁先到都接得上（panelproto.js 的回喊）。 */
   await panel.start(PANEL_HANDLERS);

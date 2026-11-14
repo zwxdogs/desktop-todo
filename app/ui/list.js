@@ -69,9 +69,27 @@ export function createList(opts = {}) {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   }
 
+  /* 外部改动冲突期间按住写盘（#22）。轮询发现文件变了、又要弹层问用户时，先把正在编辑的
+     字落定（那一步会排一次写盘），再 hold —— 否则那一笔当场把磁盘上的外部内容盖掉，
+     「撤回」要留档的那份就没了。按住期间变更照旧进内存、照旧重绘，只是不出手写盘。
+
+     release 不写盘：撤回落什么由窗口决定（先写 -out-bak 再整份写回），这里只解锁。 */
+  let held = false;
+
+  function hold() {
+    held = true;
+    cancelSave();
+  }
+
+  function release() {
+    held = false;
+  }
+
   async function doSave() {
     saveTimer = null;
     if (!hooks.write) return;
+    // 按住期间到点的那一笔：丢掉计时器就好。改动还在内存里，解锁后由窗口决定怎么落
+    if (held) return;
     let ok = false;
     let err = null;
     try { ok = await hooks.write(text()); } catch (e) { ok = false; err = e; }
@@ -80,6 +98,7 @@ export function createList(opts = {}) {
 
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
+    if (held) return;          // 按住期间不排：排了也只是到点自己丢掉，白白拖着一个计时器
     saveTimer = setTimeout(doSave, debounceMs);
   }
 
@@ -387,6 +406,9 @@ export function createList(opts = {}) {
     hasBom: () => hasBom,
     pending: () => !!saveTimer,
     cancelSave,
+    /* 外部改动冲突期间按住写盘（#22）：弹层开着的时候绝不能让 250ms 窗口把外部内容盖掉。 */
+    hold,
+    release,
     canUndo: () => undoStack.canUndo(),
     undoSize: () => undoStack.size(),
     canRestoreBackup,

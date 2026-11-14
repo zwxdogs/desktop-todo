@@ -96,10 +96,24 @@ pub fn write(path: &Path, content: &str, has_bom: bool) -> Result<(), String> {
         data.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
     }
     data.extend_from_slice(content.as_bytes());
+    write_bytes(path, &data)
+}
+
+/// 原子写一个字节序列：先写同目录的 `.todo_tmp`，再 rename 盖上去。
+///
+/// `write` 与 `write_out_backup` 共用这一步：两条写路径的「写到一半崩掉不会留下半份」
+/// 是同一个保证，不该各写一遍。失败时把 tmp 收掉——留着它只会在用户目录里积垃圾。
+fn write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
     // todo.pyw 用 path + ".todo_tmp"；with_extension 会替换已有扩展名，手动拼接
     let tmp = PathBuf::from(format!("{}.todo_tmp", path.display()));
-    std::fs::write(&tmp, &data).map_err(|e| format!("write: {}", e))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("replace: {}", e))
+    if let Err(e) = std::fs::write(&tmp, data) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("write: {}", e));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replace: {}", e)
+    })
 }
 
 /// 删除已完成的兜底（#20）：备份文件的路径。
@@ -113,13 +127,19 @@ pub fn write(path: &Path, content: &str, has_bom: bool) -> Result<(), String> {
 /// `extension` 返回 None，与「最后一个 `.` 之前」这条手工规则在这一点上一致，
 /// 因此这里直接用 Path 的两个方法，不自己切字符串。
 pub fn backup_path(path: &Path) -> PathBuf {
+    sibling_with_suffix(path, "-bak")
+}
+
+/// 主名后加一个后缀、扩展名与目录原样保留。`-bak` 与 `-out-bak` 共用这一份规则：
+/// 两处各写一遍就会有一天只在其中一处改了「按最后一个 `.` 切」。
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
     let ext = path.extension().map(|s| s.to_string_lossy().into_owned());
     let name = match (stem, ext) {
-        (Some(stem), Some(ext)) => format!("{}-bak.{}", stem, ext),
-        (Some(stem), None) => format!("{}-bak", stem),
+        (Some(stem), Some(ext)) => format!("{}{}.{}", stem, suffix, ext),
+        (Some(stem), None) => format!("{}{}", stem, suffix),
         // 没有文件名（路径以 `..` 之类结尾）：原样拼，调用方本来就该先检查
-        (None, _) => format!("{}-bak", path.display()),
+        (None, _) => format!("{}{}", path.display(), suffix),
     };
     match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
@@ -159,6 +179,35 @@ pub fn read_backup(src: &Path) -> Result<Option<BackupOut>, String> {
     }
     let out = read(&target)?;
     Ok(Some(BackupOut { text: out.text, has_bom: out.has_bom, nl: out.nl }))
+}
+
+/// 外部改动「撤回」之前的那份留档（#22）：磁盘上现在这份存到同目录的 `-out-bak` 里。
+///
+/// 与 `backup_path` 同一套命名规则，只是后缀不同：`待办.md` → `待办-out-bak.md`。
+/// 两种备份互不覆盖（`待办-bak.md` 是删除已完成的兜底，`待办-out-bak.md` 是外部改动的留档），
+/// 也都永远不等于源文件自己——源文件叫 `待办-out-bak.md` 时留档落到 `待办-out-bak-out-bak.md`。
+pub fn out_backup_path(path: &Path) -> PathBuf {
+    sibling_with_suffix(path, "-out-bak")
+}
+
+/// 撤回：**先把磁盘上那份抄进 `-out-bak`，成功了才把内存里那份整份写回原文件**。
+///
+/// 顺序就是这条路径的全部正确性，缺一不可：
+///   1. 读原文件的**原始字节**（不按 UTF-8 解码）。外部程序写进来的可能不是 UTF-8，
+///      解码失败就抄不了——而那时恰恰最需要留档。
+///   2. 原子写 `-out-bak`。这一步失败就 return，原文件一个字节都不动：否则外部改动
+///      凭空消失、备份也没落地。
+///   3. 原子写原文件（内存里那份）。
+///
+/// 返回备份路径，给前端拿去提示用户「外部那份存在哪儿」。
+/// 整份覆盖、不做三方合并：Markdown 待办清单没有可靠的合并语义（票 #22 已拍板 8-b）。
+pub fn revert_external(src: &Path, content: &str, has_bom: bool) -> Result<PathBuf, String> {
+    let external = std::fs::read(src)
+        .map_err(|e| format!("read: {}", e))?;
+    let target = out_backup_path(src);
+    write_bytes(&target, &external)?;
+    write(src, content, has_bom)?;
+    Ok(target)
 }
 
 /// explorer 的命令行只认**反斜杠分隔的绝对路径**：拿 `E:/项目/待办.md` 这种正斜杠路径喂 `/select,`，
@@ -500,6 +549,116 @@ mod backup_tests {
         assert_eq!(got.text, "- [x] 删前的\r\n");
         assert_eq!(got.nl, "\r\n", "换行符跟着备份文件走");
         assert!(got.has_bom, "BOM 也要交出来");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// 外部改动撞上未落盘本地改动时的「撤回」（#22）：磁盘那份存成 `-out-bak`，原文件被内存内容整份写回。
+//
+// 这一组钉住的是**顺序**与**失败时的字节**：
+//   · 先把外部那份落进 `-out-bak`，写成功了才允许碰原文件。写备份失败时原文件一个字节不动。
+//   · 外部那份按**原始字节**抄，不按解码后的文本：外部程序写进来的可能不是 UTF-8，
+//     解码失败就抄不了，而那时恰恰最需要留档。
+//   · 命名与 #20 的 `-bak` 同源（同一个拼名字的函数，后缀不同），永远不等于源文件。
+#[cfg(test)]
+mod out_backup_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("file-outbak-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn out_backup_keeps_the_extension_and_adds_dash_out_bak_to_the_stem() {
+        assert_eq!(
+            out_backup_path(Path::new("E:\\项目\\待办.md")),
+            PathBuf::from("E:\\项目\\待办-out-bak.md")
+        );
+        assert_eq!(out_backup_path(Path::new("E:\\项目\\待办")), PathBuf::from("E:\\项目\\待办-out-bak"));
+        // 与 #20 那套规则同源：主名按最后一个 `.` 切
+        assert_eq!(out_backup_path(Path::new("E:\\项目\\a.b.md")), PathBuf::from("E:\\项目\\a.b-out-bak.md"));
+        // 两种备份互不覆盖：源文件叫 待办-bak.md 时，out-bak 也不是它
+        assert_eq!(
+            out_backup_path(Path::new("E:\\项目\\待办-bak.md")),
+            PathBuf::from("E:\\项目\\待办-bak-out-bak.md")
+        );
+    }
+
+    #[test]
+    fn the_out_backup_never_lands_on_the_source_itself() {
+        for p in ["E:\\项目\\待办.md", "E:\\项目\\待办", "待办.md", "E:\\项目\\待办-out-bak.md"] {
+            let src = Path::new(p);
+            assert_ne!(out_backup_path(src), src, "备份路径不能等于源文件：{}", p);
+            assert_eq!(out_backup_path(src).parent(), src.parent(), "必须与源文件同目录");
+        }
+    }
+
+    #[test]
+    fn reverting_stores_the_external_bytes_and_writes_the_memory_version_back() {
+        let dir = tmpdir("ok");
+        let src = dir.join("待办.md");
+        // 磁盘上那份 = 外部程序写进来的（BOM + CRLF）
+        std::fs::write(&src, [&[0xEF, 0xBB, 0xBF][..], "- [ ] 外部\r\n".as_bytes()].concat()).unwrap();
+
+        // 内存里那份 = 用户此刻看到的（无 BOM、LF）
+        let target = revert_external(&src, "- [ ] 我的\n- [x] 勾过的\n", false).unwrap();
+        assert_eq!(target, dir.join("待办-out-bak.md"));
+
+        // 备份拿到的是外部那份，逐字节（BOM 与 CRLF 都在）
+        let bak = std::fs::read(&target).unwrap();
+        assert_eq!(&bak[..3], &[0xEF, 0xBB, 0xBF], "外部那份的 BOM 要原样留档");
+        assert_eq!(String::from_utf8(bak[3..].to_vec()).unwrap(), "- [ ] 外部\r\n");
+
+        // 原文件变成内存里那份
+        let now = read(&src).unwrap();
+        assert_eq!(now.text, "- [ ] 我的\n- [x] 勾过的\n");
+        assert!(!now.has_bom, "内存那份没有 BOM，写回去就不该多出来");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_external_side_is_copied_as_bytes_so_a_non_utf8_file_still_gets_archived() {
+        // 外部程序可能写进一个不是 UTF-8 的文件：那时 read() 会失败，而恰恰最需要留档
+        let dir = tmpdir("raw");
+        let src = dir.join("待办.md");
+        std::fs::write(&src, [0xFF, 0xFE, 0x00, 0x41]).unwrap();
+
+        revert_external(&src, "- [ ] 我的\n", false).unwrap();
+        assert_eq!(std::fs::read(dir.join("待办-out-bak.md")).unwrap(), vec![0xFF, 0xFE, 0x00, 0x41]);
+        assert_eq!(read(&src).unwrap().text, "- [ ] 我的\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn when_the_backup_cannot_be_written_the_source_is_left_byte_for_byte_alone() {
+        // 硬性要求：写 -out-bak 失败时绝不覆盖原文件——否则外部改动凭空消失、备份也没落地
+        let dir = tmpdir("fail");
+        let src = dir.join("待办.md");
+        let external = "- [ ] 外部写进来的\n";
+        std::fs::write(&src, external).unwrap();
+        // 把备份路径占成一个目录：写 tmp 能过，rename 到目录必失败
+        std::fs::create_dir_all(dir.join("待办-out-bak.md")).unwrap();
+
+        let err = revert_external(&src, "- [ ] 我的\n", false).unwrap_err();
+        assert!(err.starts_with("replace"), "要说清是替换那一步失败的：{}", err);
+        assert_eq!(read(&src).unwrap().text, external, "原文件一个字节都不许动");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_source_is_an_error_and_writes_nothing() {
+        // 文件在等我们的这一秒里被删掉了：外部那份没得抄，就不该假装撤回过
+        let dir = tmpdir("gone");
+        let src = dir.join("待办.md");
+        let err = revert_external(&src, "- [ ] 我的\n", false).unwrap_err();
+        assert!(err.starts_with("read"), "读不到外部那份要报读：{}", err);
+        assert!(!src.exists(), "不许顺手把原文件建出来");
+        assert!(!dir.join("待办-out-bak.md").exists(), "也不许留下半个备份");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -46,6 +46,20 @@
     </svg>
   </div>
   <div id="menu"></div>
+  <!-- 外部改动冲突弹层（#22）：轮询发现磁盘那份变了、而本地还有没落盘的改动时出现。
+       自绘而不是原生 MessageBoxW：原生框只给「是/否」、改不了按钮文字，深色下还会闪白框。
+       弹层开着时写盘被按住（list.hold），所以「刷新 / 撤回」两个选择都还成立。 -->
+  <div id="conflict" role="dialog" aria-modal="true" aria-labelledby="conflict-title" aria-describedby="conflict-text">
+    <div id="conflict-box">
+      <div id="conflict-title"></div>
+      <div id="conflict-text"></div>
+      <div id="conflict-reason"></div>
+      <div id="conflict-btns">
+        <button type="button" id="conflict-refresh"></button>
+        <button type="button" id="conflict-revert"></button>
+      </div>
+    </div>
+  </div>
   <!-- 回执浮层：批量删除已完成之后在底部出现 3 秒，点它撤销整批（app.js showToast） -->
   <div id="toast"></div>
   <script type="module" src="app.js"></script>

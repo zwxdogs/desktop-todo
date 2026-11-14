@@ -84,6 +84,29 @@ pub async fn read_md_backup(file: String) -> Result<Option<files::BackupOut>, St
     files::read_backup(Path::new(&file))
 }
 
+/// 外部改动「撤回」（#22）：先把磁盘上那份抄进同目录的 `-out-bak`，成功之后才把内存里
+/// 那份整份写回原文件。顺序在 `files::revert_external` 里，**写备份失败时原文件一个字节
+/// 不动**——所以这里照 `write_md` 那样过 `warn_readonly` 并把原因抛给前端，界面要能说清
+/// 为什么没撤回成，而不是留一个「点了没反应」。
+///
+/// 返回 `{ backup }`：备份落在哪儿由 Rust 从源文件派生，前端不拼文件名。
+#[derive(Serialize)]
+pub struct RevertOut {
+    pub backup: String,
+}
+
+#[tauri::command]
+pub async fn revert_md_external(
+    app: tauri::AppHandle,
+    file: String,
+    content: String,
+    has_bom: bool,
+) -> Result<RevertOut, String> {
+    let res = files::revert_external(Path::new(&file), &content, has_bom);
+    let res = res.inspect_err(|e| Host::of(&app).warn_readonly(e))?;
+    Ok(RevertOut { backup: res.to_string_lossy().into_owned() })
+}
+
 #[tauri::command]
 pub fn save_config(app: tauri::AppHandle) {
     persist::save(&Host::of(&app));

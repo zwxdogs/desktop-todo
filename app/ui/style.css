@@ -423,6 +423,84 @@ body.dragging .row:hover .badge { transform: none; }
   margin: 4px 0;
 }
 
+/* ---------- 外部改动冲突弹层（#22） ----------
+   自绘而不是原生 MessageBoxW：原生框只给「是/否」、改不了按钮文字，深色下还会闪白框。
+   盖住整个窗口（半透明遮罩 + 居中卡面），z-index 高于右键菜单与回执浮层：它问的是
+   「刚才那些字还要不要」，任何别的界面都不该抢在它前面。 */
+#conflict {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(15, 23, 42, 0.28);
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+#conflict.show { display: flex; }
+#conflict-box {
+  width: 100%;
+  max-width: 320px;
+  background: #FFFFFF;
+  border: 1px solid #DFE4EA;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
+  padding: 14px 16px 12px;
+}
+#conflict-title {
+  font-size: 10pt;
+  font-weight: bold;
+  color: #24292F;
+  margin-bottom: 6px;
+}
+#conflict-text {
+  font-size: 9pt;
+  line-height: 17px;
+  color: #5A6472;
+  user-select: text;
+}
+/* 撤回失败时把原因挂在这一行：原文件一个字节都没动，用户此刻还能改选「刷新」 */
+#conflict-reason {
+  display: none;
+  margin-top: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #FDECEA;
+  color: #9B2C2C;
+  font-size: 9pt;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+#conflict-reason.show { display: block; }
+#conflict-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+#conflict-btns button {
+  min-width: 64px;
+  padding: 5px 12px;
+  border: 1px solid #DFE4EA;
+  border-radius: 5px;
+  background: #FFFFFF;
+  color: #24292F;
+  font-family: inherit;
+  font-size: 9pt;
+  cursor: pointer;
+}
+#conflict-btns button:hover { background: #F2F5F8; }
+#conflict-btns button:active { background: #E8EEF6; }
+/* 「撤回」是保住用户字的那个选择，按主要动作画 */
+#conflict-revert {
+  background: #4A8FE2;
+  border-color: #4A8FE2;
+  color: #FFFFFF;
+}
+#conflict-revert:hover { background: #3F80CE; border-color: #3F80CE; }
+#conflict-revert:active { background: #376FB4; border-color: #376FB4; }
+
 /* ---------- 详情面板 ---------- */
 #panel-body {
   flex: 1;

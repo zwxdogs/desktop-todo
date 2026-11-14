@@ -156,6 +156,7 @@ pub fn run() {
             crate::commands::write_md,
             crate::commands::write_md_backup,
             crate::commands::read_md_backup,
+            crate::commands::revert_md_external,
             crate::commands::file_state,
             crate::commands::save_config,
             crate::commands::set_docked,
