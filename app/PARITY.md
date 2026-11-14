@@ -21,14 +21,14 @@
 | —（0.4.2 新增） | createList（app/ui/list.js） | 清单的变更意图各一份实现 + 撤销（含 #20 的读回备份兜底）+ 撤销栈 + 写盘合并 + 面板锚点（模块 + hooks，TDD，§3-21、§3-23） |
 | —（0.4.2 新增） | createProtocol（app/ui/panelproto.js） | 面板协议：消息表 / 握手 / 显式回执（模块，22 项 TDD，§3-20） |
 
-测试：`node --test app/ui/*.test.js tools/*.test.mjs` = **251/251**（md + 行内加号落点 + 批量删除已完成 + 清单模块 + undo + 删除已完成的备份兜底 21 项 + 顶栏提示条 15 项 + 新建示例文案 + 滚动条几何 + 文件身份读端 + 拖动落点 18 项 + 面板协议 22 项 + 发布版本账目 10 项，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。`cargo test --offline` = **50/50**（两态 3 + 看门狗 2 + 退出 2 + 文件 20 + config 8 + 几何 6 + 维护 1 + 启动 8，§3-18、§3-21、§3-23）。逐次变动的数字见 §4。
+测试：`node --test app/ui/*.test.js tools/*.test.mjs` = **274/274**（md + 行内加号落点 + 批量删除已完成 + 清单模块 + undo + 删除已完成的备份兜底 21 项 + 顶栏提示条 22 项 + 读取失败的分类/措辞/可写判定 16 项 + 新建示例文案 + 滚动条几何 + 文件身份读端 + 拖动落点 18 项 + 面板协议 22 项 + 发布版本账目 10 项，与已删除的 `test_todo.py` 的 36 用例同源扩展，见 [ADR 0006](../docs/adr/0006-remove-tk-fallback.md)）。`cargo test --offline` = **50/50**（两态 3 + 看门狗 2 + 退出 2 + 文件 20 + config 8 + 几何 6 + 维护 1 + 启动 8，§3-18、§3-21、§3-23）。逐次变动的数字见 §4。
 
 ## 2. 应用层逐函数对照
 
 | todo.pyw | Tauri 实现载体 | 状态 |
 |---|---|---|
 | read_file(540)/write_text(550) | Rust read_md_file/write_md_file（BOM/`.todo_tmp`/replace/只读警告） | 等效 |
-| load_file(565) | app.js loadFile（missing→showMissing；undo 栈重置；标题由 Rust FileIdentity 回传，去 .md） | 等效 |
+| load_file(565) | app.js loadFile（missing→showMissing；read/utf8→顶栏可点重试、清单不可写，§3-24；undo 栈重置；标题由 Rust FileIdentity 回传，去 .md） | 等效 + 有意补强（§3-24） |
 | refresh_from_disk(581) | **已删除**（顶栏 ↻ 已去掉：外部改动本来就由 `poll_tick` 每秒按 mtime:size 自动重载，§3-16） | 取消 |
 | show_missing(591) | app.js showMissing（同文案/wraplength 300） | 等效 |
 | render_list(605) | app.js renderList（滚动分数保存恢复；0.4.0 起主窗口跳过备注行） | 等效 |
@@ -128,6 +128,14 @@
     - **失败分型**：写备份失败 → 这一次不删、清单与撤销栈都不动，顶栏挂一条 `kind-error`（常驻、**不可点**——能重试的那件事本来就在界面上，伪装成可点是骗人；`notice.js` 为此多了第三种状态，且不许盖掉还挂着的「写盘失败」）。读备份失败（被占用 / 没权限 / 不是 UTF-8）→ 说明原因、不动内存、凭据留着下次再试；备份不存在 → 凭据作废并静默。`files::read_backup` 把「没有」(`Ok(None)`) 与「读不动」(`Err`) 分成两种结果，`Ok(Some)` 才带内容。
     - **Rust 两个新命令**：`write_md_backup`（走 `files::write_backup`，失败照 `write_md` 那样过 `warn_readonly` 并把原因抛给前端）与 `read_md_backup`（`Result<Option<BackupOut>, String>`）。备份路径只由 Rust 从源文件派生，前端不拼文件名。
     - 验收：`node --test app/ui/*.test.js tools/*.test.mjs` = **251**（新增 `app/ui/list.backup.test.js` 21 项 + `notice.test.js` 7 项，`list.test.js` 三条 `deleteCompleted` 改成 `await`），`cargo test --offline` = **50**（新增 `files::backup_tests` 8 项）。实机走 WebView2 远程调试驱动 testing 实例（清单在 `%TEMP%`，BOM + CRLF，不碰真实清单）12 项全过：删完出现 `检查清单-bak.md` 且与删除前逐字节相同（BOM 与 CRLF 都在）；再删一次只覆盖、目录里仍只有一份；外部改动触发整份重载后 Ctrl+Z 仍取回删除前的清单（顶栏「已取回删除前的清单（来自同目录的 -bak 备份）」，文案不写死文件名——清单叫 检查清单.md 时备份就是 检查清单-bak.md）；恢复后再按 Ctrl+Z 不会把同一批再恢复一遍；重载页面（= 新的一次运行）后按 Ctrl+Z **没有**复活盘上遗留的旧备份、清单一字未动；源文件叫 `待办-bak.md` 时备份落 `待办-bak-bak.md` 且源文件不被覆盖；把备份路径占成目录制造写失败 → 这一次没删、顶栏「没能写备份文件，这次没有删除：replace: 拒绝访问。 (os error 5)」且不可点，清掉障碍后重试正常写出。
+24. **读取失败分得清：不存在 / 读不动 / 不是 UTF-8，不再给空白窗口（0.4.2，[#21](https://github.com/zwxdogs/desktop-todo/issues/21)）**：文件存在却读不进来时（被别的程序占着 / 没读取权限 / 内容不是 UTF-8），`loadFile` 原来只认 `missing` 前缀，另外两种只写一行日志就 `return`——**启动时用户看到的是一个空白窗口**，以为文件丢了，去点「打开文件」还是同一个文件，死循环。Rust 侧早分好了三种前缀（`files::read`），缺口全在前端。现在分三支：`missing` 照旧走 `showMissing`（占位文案报图标序号，不变）；`read:` 与 `utf8:` 走新的 `showLoadFailure`，清掉清单区、顶栏挂一条**常驻可点**的说明，点它是重新读那个文件。前缀分类与两段文案在 `app/ui/readfail.js`（纯函数，照 `starter.js` 把措辞钉成字符串常量），判定与文案分发在 `app/ui/loadstate.js`。
+    - **只按前缀认，不按正文认**：中文系统上「另一个程序正在使用此文件，进程无法访问」这类文案里也带 file / read，照正文猜会把「另存为 UTF-8」和「关掉占用它的程序」两套处置对调。**认不出来的一律算「打不开」**——宁可说打不开，也不能退回什么都不显示。
+    - **不可写是硬要求（验收第 4 条）**：读失败一律 `listReady() === false`，退出、切文件、新建、右键菜单、顶栏两枚按钮、`Ctrl+Z` 全部跟着收手。最危险的一支不是 UTF-8：文件里有内容、内存里是空的，放开写就是把它清空。`loadstate.canWriteList` 以「这一次失败」为准而不是只看 `loaded`——重载失败的那一刻 `loaded` 可能还停在上一次的 `true`。
+    - **`Ctrl+Z` 在读失败期间不接按键**：撤销要先写盘，而在那一刻写盘就是在盖掉没读进来的文件（这条是复查时补的，原来会绕过 `listReady`）。
+    - **失败时记下 `lastSeen`**：不记的话每秒轮询都会重试一次、日志刷屏；记下之后，用户把编码改好或者关掉占用它的程序，mtime 一变就自动重读，也可以点提示条立刻重试。
+    - **提示条多一种状态 `kind-load`**（`notice.js`）：常驻、可点、动作是重新读文件；它接管早先的一条写盘失败（「现在这个窗口的样子」比一条旧说明更贴近），但短消息不许盖它，`saved` / `dismiss-error` 也清不掉它，只有 `load-ok` 才收。两种「可点」做的事完全不同，所以动作由状态机的 `noticeAction` 回答（`retry-save` / `retry-load`），窗口不猜。
+    - **明确不做**「强制以 UTF-8 重读」那个逃生口（维护者已定）。
+    - 验收：`node --test app/ui/*.test.js tools/*.test.mjs` = **275**（新增 `readfail.test.js` 9 项：三种前缀、只按前缀认、认不出来算打不开、Error 包装、文件名提取、两段文案逐字、不带整条路径、拿不到名字时句子仍通顺；`loadstate.test.js` 8 项：三种失败都不可写、`loaded` 是旧的 `true` 也不算可写、缺失态不借提示条说话、文案跟着当前文件走；`notice.test.js` 从 15 项增到 21 项：装载失败常驻可点、短消息不许盖、接管写盘失败、`saved`/`dismiss-error` 清不掉、`load-ok` 只清它、新一条换掉旧一条、`noticeAction` 的三种回答），`cargo test --offline` = **50**（Rust 侧这次一行没改）。实机走 WebView2 远程调试驱动 testing 实例（清单在 `%TEMP%`，不碰真实清单）**29 项全过**：GBK 文件启动 → 顶栏「这个文件不是 UTF-8 编码，读不出来：编码.md　用记事本打开它，另存为时把编码选成 UTF-8，再回来点这里重试。」且 `role=button`、清单区不是空白也不是缺失占位、两枚按钮置灰；另存为 UTF-8 后点提示 → 两行都出来、提示条自己收掉、文件没被这次重试改动；用 `CreateFileW(share=0)` 独占占住文件启动 → 「打不开这个文件：占用.md　可能正被别的程序占用，或没有读取权限。关掉占用它的程序后，点这里重试。」，松开占用后点它 → 三行都出来、文件内容一字未变；读失败态点 ✕ 退出 → 文件**逐字节不变**（13 → 13 字节，没被空清单盖掉）；文件不存在仍然走原来的占位（「目前没有打开待办 Markdown 文件。」+ 图标序号），两条新文案没跑出来；外部把 GBK 改存成 UTF-8 后不点任何东西，轮询自己把清单读回来、提示条跟着收掉。
 
 ## 4. 验证状态
 - [x] 0.4.2 按接缝拆开 Rust 壳（2026-11-14，[#17](https://github.com/zwxdogs/desktop-todo/issues/17)）：`cargo test --offline` 40/40（原 21 项按新模块归位 + 新增 19 项：几何 6、维护收敛 1、启动 8、文件 4）、`node --test app/ui/*.test.js tools/*.test.mjs` 199/199、`app\build.ps1` release 构建后部署重启（`E:\桌面待办\DesktopTodo`，`config.json` 原样 103 字节）。实机探针：部署实例 `ex=0x190`（TOOLWINDOW/APPWINDOW/TOPMOST = True/False/False）且紧贴 `Progman` 之上；testing `float` 实例 `ex=0x40110`；testing `300,200` 实例 `desktop mode` 且维护轮询 3 秒后 exstyle 与矩形不漂移。验收标准逐条：贴桌面一次调用（`dock::enter`，启动处不再连调两次）；五件事具名（`reanchor` / `heal_panel` / `rescue_offscreen` / `flush_config` / `file_state`）；命令层零 Win32、零共享状态锁；现有 Rust 测试全绿；行为不变（两态 exstyle、Win+D、面板自愈、离屏救援、退出与自重启）；按 AGENTS.md 重建并部署启动正常

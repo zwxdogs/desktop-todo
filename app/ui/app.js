@@ -16,7 +16,10 @@ import { createRowDrag, mainDropTarget, GRIP_SVG } from './rowdrag.js';
 import { createMenu } from './rowmenu.js';
 import { openRowEdit } from './rowedit.js';
 import { connect, MAIN, requireHost } from './panelproto.js';
-import { nextNotice, noticeIsClickable } from './notice.js';
+import { nextNotice, noticeAction } from './notice.js';
+import {
+  classifyReadError, loadFailure, canWriteList, loadNoticeText,
+} from './readfail.js';
 
 /* 宿主对象由 Tauri 的初始化脚本在页面脚本**之前**写好（withGlobalTauri），
    所以取一次就够：取不到是真的没注入，requireHost 当场抛错（#16，不再惰性重试）。
@@ -61,6 +64,7 @@ const S = {
   docked: false,   // ADR 0004：false = 普通窗口（默认）；true = 固定在桌面（无任务栏图标）
   missingShown: false,
   loaded: false,   // 内存里的清单是否来自一次成功的读取；没装载成功就不许写盘（否则等于清空文件）
+  loadFail: null,  // 这一次装载为什么失败（#21）：{kind,file} 或 null；判定与文案在 loadstate.js
   edit: null,            // { index, input, handle }
   panelOpen: false,
   panelEditing: false,   // 面板窗口里有未落定的编辑
@@ -178,8 +182,20 @@ async function fileStateExists() {
    抛给清单模块的 afterSave（它把 err 交给提示条）。
 
    命令成功时返回的是 Ok(()) = JS 侧的 undefined，所以「有没有写进去」由**是否抛错**表达，
-   不看返回值：跑完没抛就是写进去了。 */
+   不看返回值：跑完没抛就是写进去了。
+
+   #21：**这里是闸门本身，不只是入口置灰。** 读失败期间内存里那份清单不是文件的内容，
+   任何一条把它写回文件的路都等于清空用户的东西；而入口有很多（勾选、面板、撤销、
+   详情面板的勾/改/删、拖动排序、删除已完成、退出、切文件……），靠每一处都记得问一句
+   `listReady()` 是守不住的——#21 复查就抓到「文件读完之后变非 UTF-8，面板还开着，
+   在面板里勾一下就把旧内存写回去了」。所以判定放在这里：所有写盘都从这儿出去。 */
 async function writeText(content) {
+  if (!listReady()) {
+    // 不是「这次写失败」，而是根本不许写。丢回一个明确的错误让调用方按失败处理，
+    // 提示条那条装载失败已经在说为什么了，这里不再叠一条。
+    log('write blocked: 清单未装载成功，拒绝写盘（#21）');
+    throw new Error('清单没有装载成功，这次改动不会写进文件');
+  }
   try {
     await invoke('write_md', { file: S.file, content, hasBom: list.hasBom() });
     S.lastSeen = await statNow();
@@ -264,6 +280,16 @@ async function undoNow() {
 
 /* ---------- 文件装载（todo.pyw:565-602） ---------- */
 
+/* 装载失败之后清场：清单区清空（内存里那份不是文件的内容，不能继续画成「这就是你的清单」）,
+   两枚跟着「有没有文件可显示」走的按钮置灰。两种失败共用这一步，差别只在顶上说什么。 */
+function clearListView() {
+  listEl.textContent = '';
+  ROWS.clear();
+  VIS.length = 0;
+  drag.cleanup();   // 行都没了：拖动浮层/插入线也要收掉
+  updateChrome();
+}
+
 /* 缺文件占位（0.4.0）：不再提「右键 → 更换文件…」（那条标题栏菜单已经整块删了），
    改成按顶栏图标的实际顺序报序号，用户照着点就行。序号每次现算，以后调按钮顺序
    这句话会自己跟着变，不会指错地方。0.4.2 起打开/新建合进同一枚下拉，
@@ -272,16 +298,40 @@ function showMissing() {
   if (S.missingShown) return;
   S.missingShown = true;
   S.loaded = false;
-  listEl.textContent = '';
-  ROWS.clear();
-  VIS.length = 0;
+  clearLoadFailure();   // 换成「文件不见了」的占位：顶上那条读不动的说明不再成立
+  clearListView();
   const btnIdx = (id) => [...document.querySelectorAll('#hdr .hbtn')].indexOf($(id)) + 1;
   const div = document.createElement('div');
   div.className = 'missing';
   // 0.4.2 起打开/新建合在一枚下拉里，所以只报一个序号（starter.js 里说明菜单项）
   div.textContent = missingHint(btnIdx('btn-file'));
   listEl.appendChild(div);
-  updateChrome();   // 没有清单可删、没有文件可显示：两枚按钮都得跟着置灰
+}
+
+/* 装载失败的两种「文件在、但读不进来」（#21）：清场，顶栏挂一条常驻、可点重试的说明。
+   缺文件不走这里——它有 showMissing 那套占位文案（报图标序号）。
+
+   编辑框与详情面板也一起收掉，**不落定**：它们指向的是上一次读进来的那份行，
+   而那份内容现在既不是文件的内容、也不该写回去。留着它们只会让用户在幻觉上继续改。 */
+function showLoadFailure(kind) {
+  S.missingShown = false;
+  S.loaded = false;
+  S.loadFail = loadFailure({ file: S.file, kind });
+  discardEditor();
+  closePanel();
+  clearListView();
+  const text = loadNoticeText(S.loadFail);
+  if (text) setNotice({ type: 'load-failed', text });
+}
+
+/* 装载成功 / 回到缺失态时，把上一次的装载失败收掉。
+   只有「装载失败」这一种提示归这里清：保存失败说的是另一件事。
+   只在**真的读成功**（loadFile 的读盘分支）与**换成缺失占位**时调——
+   `renderList` 不能调它：清单每次变更都会重画，那会把这条提示悄悄收走（#21 复查修）。 */
+function clearLoadFailure() {
+  if (!S.loadFail) return;
+  S.loadFail = null;
+  setNotice({ type: 'load-ok' });
 }
 
 async function loadFile() {
@@ -299,16 +349,25 @@ async function loadFile() {
   try {
     data = await invoke('read_md', { file: S.file });
   } catch (e) {
-    // Rust：NotFound → "missing: ..."；其余 read/utf8 错误同样按缺失提示一次
-    if (String(e).startsWith('missing')) {
+    // Rust 的三种前缀（files.rs 的 read）：missing / read / utf8。
+    // 以前只认 missing，另外两种只写一行日志就 return —— 启动时用户看到的是一个空白窗口，
+    // 以为文件丢了，去点「打开文件」还是同一个文件，死循环（#21）。
+    const kind = classifyReadError(e);
+    log(`load error (${kind}): ${e}`);
+    if (kind === 'missing') {
       showMissing();
       log(`file missing: ${S.file}`);
     } else {
-      log(`load error: ${e}`);
+      showLoadFailure(kind);
     }
+    // 记下「失败时这个文件长什么样」。不是为了自动重读（关掉占用它的程序、或者另存为 UTF-8，
+    // 都可能不改 mtime），而是为了**别每秒重试一次**：轮询比的是 mtime:size，不记的话
+    // 每一轮都会看见「变了」→ 重读 → 又失败，日志刷屏。真正的重试交给点上那条提示。
+    S.lastSeen = await statNow();
     list.setFile(S.loadedFile);   // 同上传载失败：备份凭据不能挂在没读进来的文件上
     return;
   }
+  clearLoadFailure();
   S.loaded = true;
   S.loadedFile = S.file;
   setTitle(S.title);   // 装载成功 = 回到当前文件名（清掉上一次「新建失败!」之类的临时提示）
@@ -372,6 +431,9 @@ function renderList(focusIdx) {
   const frac = max0 > 0 ? sc.scrollTop / max0 : 0;
   closeEditor();                       // 静默提交，不重渲染（todo.pyw:607）
   S.missingShown = false;
+  // 这里**不清**装载失败（#21）：renderList 每做一次变更都会跑（list.js 的 render 钩子），
+  // 在读失败期间清掉它，就等于把「打不开 / 不是 UTF-8，点这里重试」那条提示悄悄收走。
+  // 它只由 loadFile 装载成功后自己收（那才是「读得动」的证据）。
   listEl.textContent = '';
   ROWS.clear();
   VIS.length = 0;
@@ -606,9 +668,11 @@ function deleteLine(i) {
   list.remove(i);   // 子块整块删、编辑框/面板收尾都在模块里
 }
 
-/* 清单可写：文件读进来过、且没停在「文件不见了」的缺失态 */
+/* 清单可写：文件读进来过、且没停在「读不进来」或「文件不见了」的状态。
+   判定本身在 loadstate.js（有测试）：读失败时**绝不能**可写——内存里那份不是文件的内容，
+   退出或随手勾一下就会把它写回文件，等于清空用户的清单（#21 验收第 4 条）。 */
 function listReady() {
-  return S.loaded && !S.missingShown;
+  return !S.missingShown && canWriteList({ loaded: S.loaded, failure: S.loadFail });
 }
 
 /* 批量删除已完成（用户拍板）：只看顶层待办自己的勾选，勾了就整块删。
@@ -758,7 +822,7 @@ function menuBlank(x, y) {
   // 只有分组的新文件，绕过 ＋ 的示例内容），所以这一项置灰说明，而不是消失。
   menu.show([{
     label: '在末尾添加分组',
-    disabled: S.missingShown || !S.loaded,
+    disabled: !listReady(),
     fn: () => insertGroup(S.lines.length - 1),
   }], x, y);
 }
@@ -802,15 +866,18 @@ function showInfoNotice(text) {
 function paintNotice() {
   if (!noticeEl) return;
   const s = noticeState;
-  const clickable = noticeIsClickable(s);
+  const action = noticeAction(s);
   noticeEl.textContent = s ? s.text : '';
   noticeEl.classList.toggle('show', !!s);
   noticeEl.classList.toggle('kind-save', !!s && s.kind === 'save');
+  noticeEl.classList.toggle('kind-load', !!s && s.kind === 'load');
   noticeEl.classList.toggle('kind-info', !!s && s.kind === 'info');
   noticeEl.classList.toggle('kind-error', !!s && s.kind === 'error');
-  noticeEl.title = clickable ? '点这里重试保存' : '';
+  // 两种可点各有各的动作：写盘失败是重试保存，装载失败是重新读那个文件（#21）
+  noticeEl.title = action === 'retry-save' ? '点这里重试保存'
+    : action === 'retry-load' ? '点这里重新读一次文件' : '';
   // 能点时它是个按钮：不给键盘用户留一个「看得见点不到」的死角
-  if (clickable) {
+  if (action) {
     noticeEl.setAttribute('role', 'button');
     noticeEl.setAttribute('tabindex', '0');
   } else {
@@ -821,10 +888,25 @@ function paintNotice() {
 
 /* 点写盘失败那条 = 重试：把当前清单再写一次（成功的分支会自己把提示收掉）。 */
 async function retrySave() {
-  if (!noticeIsClickable(noticeState)) return;
+  if (noticeAction(noticeState) !== 'retry-save') return;
   if (!listReady()) return;
   const ok = await saveQuietly(list.text());
   if (ok) setNotice({ type: 'saved' });
+}
+
+/* 点装载失败那条 = 重试读取（#21）：重新走一趟 loadFile，成功就照常显示清单，
+   失败就换成新的那条说法。文件被占用时用户关掉占用它的程序，点一下这里就好了。
+   与写盘那条共用同一个位置，所以动作按当前状态分派，不各自抢 click。 */
+async function retryLoad() {
+  if (noticeAction(noticeState) !== 'retry-load') return;
+  log(`retry load: ${S.file}`);
+  await loadFile();
+}
+
+function noticeClick() {
+  const action = noticeAction(noticeState);
+  if (action === 'retry-save') retrySave();
+  else if (action === 'retry-load') retryLoad();
 }
 
 /* ---------- 详情面板（todo.pyw:1074-1261；#16 起跨窗只走 panelproto.js） ----------
@@ -1017,7 +1099,7 @@ async function newFile() {
   const pending = list.pending();
   list.cancelSave();
   closeEditor();
-  if (pending && S.loaded && !S.missingShown && !(await saveQuietly(list.text()))) {
+  if (pending && listReady() && !(await saveQuietly(list.text()))) {
     showInfoNotice('新建之前旧文件没写进去，刚才那几笔改动没能保住');
   }
   let res;
@@ -1090,10 +1172,11 @@ async function exitApp() {
     list.cancelSave();
     // 没装载成功就绝不写盘（0.4.0 修）：以前无条件写，退出一次就"生"出一个空文件，
     // 下次启动看着像本来就有文件，示例内容和新建引导再也不会出现；
-    // 读取失败（比如文件不是 UTF-8）时同理——内存里那份空清单不是文件的内容。
+    // 读取失败（#21：被占用 / 没权限 / 不是 UTF-8）时同理——内存里那份不是文件的内容，
+    // 写回去就是把用户读不进来的清单清空。判定统一走 listReady()（含装载失败）。
     // 退出时写失败已经来不及在界面上说了（窗口马上就没了），所以只留日志，
     // 由 Rust 侧 exit 前那一次 persist 与磁盘状态兜底（#18 只负责「用着的时候看得见」）。
-    if (S.loaded && !S.missingShown && !(await saveQuietly(list.text()))) {
+    if (listReady() && !(await saveQuietly(list.text()))) {
       log('exit: 退出前最后一次写盘失败');
     }
   } catch (e) { /* Tk on_close 同款吞异常 */ }
@@ -1165,14 +1248,14 @@ function bindChrome() {
   on('btn-file', toggleFileMenu);
   on('btn-reveal', () => invoke('open_file_location', { file: S.file }));
   on('btn-clear-done', deleteCompletedTodos);
-  // 提示条：只有「写盘失败」那条能点，点了就重试保存（键盘 Enter / Space 同效）
+  // 提示条：写盘失败那条点了重试保存，装载失败那条点了重新读文件（#21）
   if (noticeEl) {
-    noticeEl.addEventListener('click', () => { retrySave(); });
+    noticeEl.addEventListener('click', noticeClick);
     noticeEl.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
       if (!noticeIsClickable(noticeState)) return;
       e.preventDefault();
-      retrySave();
+      noticeClick();
     });
     noticeEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
   }
@@ -1207,6 +1290,9 @@ function bindChrome() {
   // Ctrl+Z（todo.pyw:510, 1009-1023；#20：内存栈交不出来时才允许走备份）
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      // 清单不可写时这一次按键不接：撤销要先写盘，而读失败的当下内存里那份
+      // 不是文件的内容——写回去就把它盖掉了（#21）。文件读得动之后照旧。
+      if (!listReady()) return;
       // 两个来源有一个能用就接过这次按键：光看栈会把「备份还能取回」那条路挡死
       if (!list.canUndo() && !list.canRestoreBackup()) return;
       if (S.edit || S.panelEditing) return;

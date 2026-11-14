@@ -2,7 +2,7 @@
 // 钉住的是「谁盖谁」这条政策，不碰 DOM。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nextNotice, noticeIsClickable } from "./notice.js";
+import { nextNotice, noticeIsClickable, noticeAction } from "./notice.js";
 
 test("写盘失败：从空状态接管", () => {
   const s = nextNotice(null, { type: "save-failed", text: "保存失败：磁盘已满" });
@@ -91,6 +91,60 @@ test("一次性的失败：新的一条接管旧的（两条都是 error）", ()
   const a = nextNotice(null, { type: "error", text: "取回失败：读不动" });
   const b = nextNotice(a, { type: "error", text: "没能写备份文件，这次没有删除" });
   assert.deepEqual(b, { kind: "error", text: "没能写备份文件，这次没有删除" }, "刚发生的那件事占这个位置");
+});
+
+test("点下去做什么：写盘失败=重试保存，装载失败=重试读取，其余没得点", () => {
+  // 两种「可点」长得一样、做的事完全不同，所以动作由状态机回答，窗口不猜
+  assert.equal(noticeAction(nextNotice(null, { type: "save-failed", text: "保存失败" })), "retry-save");
+  assert.equal(noticeAction(nextNotice(null, { type: "load-failed", text: "打不开" })), "retry-load");
+  assert.equal(noticeAction(nextNotice(null, { type: "error", text: "没能写备份文件" })), null);
+  assert.equal(noticeAction(nextNotice(null, { type: "info", text: "A", token: 1 })), null);
+  assert.equal(noticeAction(null), null);
+});
+
+test("装载失败（#21）：挂着，而且可点——点它就是重读那个文件", () => {
+  // 读不进来时界面上得有人说清楚，并给一条能自己走出去的路：重试。
+  const s = nextNotice(null, { type: "load-failed", text: "这个文件不是 UTF-8 编码" });
+  assert.deepEqual(s, { kind: "load", text: "这个文件不是 UTF-8 编码" });
+  assert.equal(noticeIsClickable(s), true, "点它是重试读取");
+});
+
+test("装载失败：短消息不许把它盖掉", () => {
+  const failed = nextNotice(null, { type: "load-failed", text: "打不开这个文件" });
+  const s = nextNotice(failed, { type: "info", text: "编辑已丢弃", token: 1 });
+  assert.deepEqual(s, failed, "文件都读不进来这件事比一句回执要紧");
+});
+
+test("装载失败：它是「现在这个窗口的样子」，比一条早先的保存失败更新", () => {
+  const save = nextNotice(null, { type: "save-failed", text: "保存失败" });
+  const s = nextNotice(save, { type: "load-failed", text: "打不开这个文件" });
+  assert.deepEqual(s, { kind: "load", text: "打不开这个文件" });
+});
+
+test("装载失败：一次性的失败与保存成功都不该清掉它", () => {
+  const load = nextNotice(null, { type: "load-failed", text: "打不开这个文件" });
+  // 读不进来时清单不可写，所以「保存成功」此刻本就不会发生；真来了也不代表文件读得动
+  assert.deepEqual(nextNotice(load, { type: "saved" }), load);
+  assert.deepEqual(nextNotice(load, { type: "dismiss-error" }), load);
+  // 反过来：它接管一条早先的一次性失败
+  const err = nextNotice(null, { type: "error", text: "没能写备份文件" });
+  assert.deepEqual(nextNotice(err, { type: "load-failed", text: "打不开这个文件" }),
+    { kind: "load", text: "打不开这个文件" });
+});
+
+test("装载成功（load-ok）：只清装载失败那条", () => {
+  const load = nextNotice(null, { type: "load-failed", text: "打不开这个文件" });
+  assert.equal(nextNotice(load, { type: "load-ok" }), null, "读成功了，那条说明该收掉");
+  const save = nextNotice(null, { type: "save-failed", text: "保存失败" });
+  assert.deepEqual(nextNotice(save, { type: "load-ok" }), save, "读得动不代表上一次写成功了");
+  const info = nextNotice(null, { type: "info", text: "A", token: 1 });
+  assert.deepEqual(nextNotice(info, { type: "load-ok" }), info);
+});
+
+test("装载失败：后一次失败换掉前一次的文字（换了文件重试也要跟着换）", () => {
+  const a = nextNotice(null, { type: "load-failed", text: "打不开 甲.md" });
+  const b = nextNotice(a, { type: "load-failed", text: "打不开 乙.md" });
+  assert.deepEqual(b, { kind: "load", text: "打不开 乙.md" });
 });
 
 test("dismiss-error：不动别人的消息", () => {
